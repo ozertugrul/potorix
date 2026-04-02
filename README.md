@@ -2,6 +2,18 @@
 
 > Open source KVM/libvirt control plane built with Ruby, Sinatra, Sidekiq, PostgreSQL, and Redis.
 
+<p align="center">
+  <a href="https://github.com/ozertugrul/potorix">
+    <img src="https://img.shields.io/badge/status-active-22c55e?style=for-the-badge" alt="Status: Active" />
+  </a>
+  <img src="https://img.shields.io/badge/license-MIT-2563eb?style=for-the-badge" alt="MIT License" />
+  <img src="https://img.shields.io/badge/platform-KVM%2Flibvirt-7c3aed?style=for-the-badge" alt="KVM/libvirt" />
+</p>
+
+<p align="center">
+  <img src="https://skillicons.dev/icons?i=ruby,postgres,redis,docker,linux" alt="Ruby, PostgreSQL, Redis, Docker, Linux" />
+</p>
+
 Potorix is a Proxmox-inspired virtualization panel for managing tenant-scoped VMs on libvirt/KVM hosts. It provides a real-time web UI, asynchronous VM lifecycle jobs, audit trails, and an embedded browser console (noVNC over same-origin WebSocket proxy).
 
 ## Features
