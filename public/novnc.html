@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Potorix Embedded Console</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #0b1220; color: #d6e2ff; font-family: Inter, system-ui, sans-serif; }
+      #bar { padding: 8px 10px; background: #111a2b; border-bottom: 1px solid #23314c; font-size: 12px; }
+      #screen { width: 100vw; height: calc(100vh - 34px); display: block; image-rendering: pixelated; background: #000; }
+    </style>
+  </head>
+  <body>
+    <div id="bar">Console: <span id="status">connecting...</span></div>
+    <div id="screen"></div>
+    <script type="module">
+      import RFB from '/novnc-vendor/core/rfb.js';
+
+      const statusEl = document.getElementById('status');
+      const setStatus = (msg) => {
+        statusEl.textContent = msg;
+        // Helps diagnose noVNC connection flow directly from browser devtools.
+        console.log('[potorix-novnc]', msg);
+      };
+
+      function parseParams() {
+        const q = new URLSearchParams(window.location.search);
+        return {
+          tenant: q.get('tenant') || '',
+          token: q.get('token') || '',
+          vmId: q.get('vm_id') || '',
+        };
+      }
+
+      const params = parseParams();
+      if (!params.tenant || !params.token || !params.vmId) {
+        setStatus('missing tenant/token/vm_id');
+      } else {
+        const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+        const wsUrl = `${protocol}://${window.location.host}/ws/vnc?tenant=${encodeURIComponent(params.tenant)}&token=${encodeURIComponent(params.token)}&vm_id=${encodeURIComponent(params.vmId)}`;
+        setStatus(`connecting via ${wsUrl}`);
+        try {
+          const rfb = new RFB(document.getElementById('screen'), wsUrl);
+          rfb.scaleViewport = true;
+          rfb.resizeSession = true;
+          rfb.viewOnly = false;
+          rfb.addEventListener('connect', () => { setStatus('connected'); });
+          rfb.addEventListener('disconnect', (e) => {
+            const clean = !!(e && e.detail && e.detail.clean);
+            setStatus(`disconnected (${clean ? 'clean' : 'error'})`);
+          });
+          rfb.addEventListener('credentialsrequired', () => { setStatus('credentials required'); });
+          rfb.addEventListener('securityfailure', (e) => {
+            const reason = e && e.detail && e.detail.status ? e.detail.status : 'unknown';
+            setStatus(`security failure (${reason})`);
+          });
+          rfb.addEventListener('serververification', () => { setStatus('server verification requested'); });
+        } catch (err) {
+          setStatus(`rfb init failed: ${err?.message || err}`);
+        }
+      }
+    </script>
+  </body>
+</html>

@@ -1,0 +1,35 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Ruby
+/.bundle
+/vendor/bundle
+*.gem
+
+# Logs & runtime
+log/
+logs/
+tmp/
+*.log
+*.pid
+*.seed
+
+# Database/cache artifacts
+db/*.sqlite3
+db/*.sqlite3-*
+storage/
+
+# OS/Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Containers/local tooling
+.docker/
+docker-data/
+
+# Local notes/prompts
+prompt.txt

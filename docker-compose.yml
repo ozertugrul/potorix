@@ -1,0 +1,57 @@
+services:
+  api:
+    build: .
+    command: bundle exec puma -b tcp://0.0.0.0:9292 config.ru
+    env_file:
+      - .env
+    environment:
+      VNC_PROXY_TARGET_HOST: host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - '9292:9292'
+    devices:
+      - /dev/kvm:/dev/kvm
+    volumes:
+      - /var/run/libvirt:/var/run/libvirt
+      - /var/lib/libvirt/images:/var/lib/libvirt/images
+      - /var/lib/libvirt/boot:/var/lib/libvirt/boot
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  worker:
+    build: .
+    command: bundle exec sidekiq -r ./config/sidekiq.rb -C sidekiq.yml
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    devices:
+      - /dev/kvm:/dev/kvm
+    volumes:
+      - /var/run/libvirt:/var/run/libvirt
+      - /var/lib/libvirt/images:/var/lib/libvirt/images
+      - /var/lib/libvirt/boot:/var/lib/libvirt/boot
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: potorix
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d potorix"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7

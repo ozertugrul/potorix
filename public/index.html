@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Potorix Control Center</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand">Potorix</div>
+      <nav id="menu">
+        <a class="active" data-view="dashboard" href="#dashboard">Dashboard</a>
+        <a data-view="vms" href="#vms">VMs</a>
+        <a data-view="snapshots" href="#snapshots">Snapshots</a>
+        <a data-view="jobs" href="#jobs">Jobs</a>
+        <a data-view="audits" href="#audits">Audit Logs</a>
+        <a data-view="marketplace" href="#marketplace">Marketplace</a>
+        <a data-view="backups" href="#backups">Backups</a>
+        <a data-view="agents" href="#agents">Agents</a>
+      </nav>
+    </aside>
+
+    <main class="content">
+      <header class="topbar">
+        <h1 id="view-title">Control Plane Dashboard</h1>
+        <div class="auth-box">
+          <input id="tenant" value="" placeholder="Tenant ID" />
+          <input id="token" value="" placeholder="API Key" />
+          <button id="refresh">Refresh</button>
+        </div>
+      </header>
+
+      <section id="view-dashboard" class="view active-view">
+        <section class="cards">
+          <div class="card"><h3>Tenant VM Count</h3><p id="vm-count">-</p></div>
+          <div class="card"><h3>Queued/Running Jobs</h3><p id="active-jobs">-</p></div>
+          <div class="card"><h3>Failed Jobs</h3><p id="failed-jobs">-</p></div>
+          <div class="card"><h3>Audit Events</h3><p id="audit-count">-</p></div>
+        </section>
+
+        <section class="panel">
+          <h2>System Usage</h2>
+          <div id="usage-cards" class="cards"></div>
+          <div class="usage-chart-wrap" id="usage-chart-wrap">
+            <div id="usage-bars"></div>
+          </div>
+        </section>
+
+        <section class="panel two-col">
+          <div>
+            <h2>Recent Jobs</h2>
+            <div id="jobs-table" class="table-wrap"></div>
+          </div>
+          <div>
+            <h2>Recent Audit Logs</h2>
+            <div id="audits-table" class="table-wrap"></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Live Timeline</h2>
+          <ul id="timeline" class="timeline"></ul>
+        </section>
+      </section>
+
+      <section id="view-vms" class="view">
+        <section class="panel">
+          <h2>Virtual Machines</h2>
+          <div class="pve-layout">
+            <aside class="pve-vm-list">
+              <div class="pve-vm-list-head">VM List</div>
+              <div id="vm-list"></div>
+              <div id="vm-list-empty-actions" class="vm-empty-actions" style="display:none;">
+                <button id="btn-go-create-vm">Create First VM</button>
+              </div>
+            </aside>
+            <div class="pve-main">
+              <div class="pve-main-head">
+                <div>
+                  <strong id="vm-selected-title">No VM selected</strong>
+                  <span id="vm-selected-state" class="chip">-</span>
+                </div>
+                <div class="actions-row">
+                  <button id="btn-open-create-wizard">New VM</button>
+                  <button id="btn-vm-start">Start</button>
+                  <button id="btn-vm-stop">Stop</button>
+                  <button id="btn-vm-delete">Delete</button>
+                  <button id="btn-open-console">Console</button>
+                </div>
+              </div>
+              <div class="pve-tabs">
+                <button class="pve-tab-btn active" data-vm-tab="summary">Summary</button>
+                <button class="pve-tab-btn" data-vm-tab="create">Create VM</button>
+                <button class="pve-tab-btn" data-vm-tab="hardware">Hardware</button>
+                <button class="pve-tab-btn" data-vm-tab="boot">Boot & ISO</button>
+                <button class="pve-tab-btn" data-vm-tab="console">Console</button>
+                <button class="pve-tab-btn" data-vm-tab="tasks">Tasks</button>
+              </div>
+              <div class="pve-tab-panels">
+                <section id="vm-tab-summary" class="pve-tab-panel active">
+                  <div id="vm-summary-cards" class="cards"></div>
+                </section>
+                <section id="vm-tab-create" class="pve-tab-panel">
+                  <div class="vm-card">
+                    <h3>Create New VM</h3>
+                    <p class="hint">Adim adim kurulum icin wizard kullanin.</p>
+                    <div class="actions-row">
+                      <button id="btn-open-create-wizard-tab">Open VM Wizard</button>
+                      <button id="btn-run-backup">Run Backup</button>
+                    </div>
+                  </div>
+                </section>
+                <section id="vm-tab-hardware" class="pve-tab-panel">
+                  <div id="vm-hardware-table" class="table-wrap"></div>
+                  <div class="vm-card">
+                    <h3>Offline Resource Edit</h3>
+                    <p class="hint">Bu islemler sadece VM kapaliyken uygulanir.</p>
+                    <div class="actions-row">
+                      <input id="vm-edit-vcpus" type="number" min="1" placeholder="vCPU" />
+                      <input id="vm-edit-memory" type="number" min="256" placeholder="Memory MB" />
+                      <input id="vm-edit-disk" type="number" min="5" placeholder="Primary Disk GB" />
+                      <button id="btn-vm-reconfigure">Apply Changes</button>
+                    </div>
+                  </div>
+                  <div class="vm-card">
+                    <h3>Add Extra Disk (Host-backed)</h3>
+                    <div class="actions-row">
+                      <input id="vm-extra-disk-gb" type="number" min="1" value="20" placeholder="Disk GB" />
+                      <button id="btn-vm-add-disk">Create + Attach Disk</button>
+                    </div>
+                  </div>
+                </section>
+                <section id="vm-tab-boot" class="pve-tab-panel">
+                  <input id="vm-action-id" type="hidden" />
+                  <div class="vm-card">
+                    <h3>Boot Order</h3>
+                    <div class="actions-row">
+                      <button id="btn-boot-cdrom">Set Boot: CDROM</button>
+                      <button id="btn-boot-hd">Set Boot: Disk</button>
+                    </div>
+                    <p class="hint">Kurulum için ISO attach + CDROM boot, kurulum sonrası Disk boot önerilir.</p>
+                  </div>
+                  <div class="vm-card">
+                    <h3>ISO Actions</h3>
+                    <div class="actions-row">
+                      <input id="vm-action-iso" placeholder="ISO Path (library path)" />
+                      <button id="btn-attach-iso">Attach ISO + Boot CD</button>
+                      <button id="btn-detach-iso">Detach ISO + Boot Disk</button>
+                      <button id="btn-vnc-info">VNC Info</button>
+                    </div>
+                    <div id="vnc-info" class="empty-state" style="margin-top:10px;">VNC bilgisi için VM seçin.</div>
+                  </div>
+                  <div class="vm-card">
+                    <h3>ISO Library</h3>
+                    <div class="actions-row">
+                      <button id="btn-iso-refresh">Refresh ISO Library</button>
+                    </div>
+                    <div id="iso-library-table" class="table-wrap" style="margin-top:10px;"></div>
+                    <div class="actions-row" style="margin-top:10px;">
+                      <input id="iso-import-source" placeholder="Host source path (/path/file.iso)" />
+                      <button id="btn-iso-import">Import ISO to Library</button>
+                    </div>
+                  </div>
+                </section>
+                <section id="vm-tab-console" class="pve-tab-panel">
+                  <div class="actions-row" style="margin-bottom:8px;">
+                    <button id="btn-console-fullscreen">Fullscreen</button>
+                  </div>
+                  <div class="console-wrap">
+                    <div id="console-overlay" class="console-overlay" style="display:none;">
+                      <div class="console-overlay-card">
+                        <p id="console-overlay-text">VM is powered off</p>
+                        <button id="btn-console-run">Run</button>
+                      </div>
+                    </div>
+                    <iframe id="console-frame" title="VM Console" src="/novnc.html"></iframe>
+                  </div>
+                </section>
+                <section id="vm-tab-tasks" class="pve-tab-panel">
+                  <div class="vm-card">
+                    <h3>Recent VM Jobs</h3>
+                    <div id="vm-jobs-table" class="table-wrap"></div>
+                  </div>
+                  <div class="vm-card">
+                    <h3>Recent VM Audit Events</h3>
+                    <div id="vm-audits-table" class="table-wrap"></div>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section id="view-snapshots" class="view">
+        <section class="panel">
+          <h2>Snapshot Overview</h2>
+          <div class="actions-row">
+            <select id="snapshot-vm-id"></select>
+            <input id="snapshot-name" placeholder="Snapshot name (ornek: pre-update)" />
+            <button id="btn-snapshot-list">List</button>
+            <button id="btn-snapshot-create">Create</button>
+            <button id="btn-snapshot-revert">Revert</button>
+          </div>
+          <div id="snapshots-view" class="table-wrap" style="margin-top:10px;"></div>
+        </section>
+      </section>
+
+      <section id="view-jobs" class="view">
+        <section class="panel">
+          <h2>All Jobs</h2>
+          <div id="jobs-full-table" class="table-wrap"></div>
+        </section>
+      </section>
+
+      <section id="view-audits" class="view">
+        <section class="panel">
+          <h2>Audit Trail</h2>
+          <div id="audits-full-table" class="table-wrap"></div>
+        </section>
+      </section>
+
+      <section id="view-marketplace" class="view">
+        <section class="panel">
+          <h2>Marketplace Catalog</h2>
+          <div id="marketplace-table" class="table-wrap"></div>
+        </section>
+      </section>
+
+      <section id="view-backups" class="view">
+        <section class="panel two-col">
+          <div>
+            <h2>Backup Policies</h2>
+            <div id="backup-policies-table" class="table-wrap"></div>
+          </div>
+          <div>
+            <h2>Backup Runs</h2>
+            <div id="backup-runs-table" class="table-wrap"></div>
+          </div>
+        </section>
+      </section>
+
+      <section id="view-agents" class="view">
+        <section class="panel">
+          <h2>Compute Agents</h2>
+          <div id="agents-table" class="table-wrap"></div>
+        </section>
+      </section>
+    </main>
+
+    <div id="toast-container" class="toast-container"></div>
+    <div id="vm-create-modal" class="modal hidden">
+      <div class="modal-card">
+        <h3>Create VM Wizard</h3>
+        <div id="vm-wizard-step" class="hint">Step 1 / 3</div>
+        <div id="vm-wizard-body"></div>
+        <div class="actions-row" style="margin-top:10px;">
+          <button id="btn-wizard-back">Back</button>
+          <button id="btn-wizard-next">Next</button>
+          <button id="btn-wizard-create" style="display:none;">Create</button>
+          <button id="btn-wizard-cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
