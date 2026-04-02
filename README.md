@@ -115,4 +115,4 @@ The provided `docker-compose.yml` already mounts:
 
 ## License
 
-This project is open source. Add your preferred SPDX license file (for example `MIT`) before publishing publicly.
+This project is licensed under the MIT License. See [`LICENSE`](./LICENSE).
