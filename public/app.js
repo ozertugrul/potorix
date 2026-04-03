@@ -1,5 +1,4 @@
 const el = (id) => document.getElementById(id);
-const AUTH_STORAGE_KEY = 'potorix.auth.v1';
 let socket;
 const timeline = [];
 const maxTimeline = 100;
@@ -27,27 +26,6 @@ function auth() {
   const tenant = el('tenant').value.trim();
   const token = el('token').value.trim();
   return { tenant, token, headers: { 'X-Tenant-ID': tenant, 'X-API-Key': token } };
-}
-
-function loadPersistedAuth() {
-  try {
-    const raw = window.localStorage.getItem(AUTH_STORAGE_KEY);
-    if (!raw) return;
-    const data = JSON.parse(raw);
-    if (el('tenant') && typeof data.tenant === 'string') el('tenant').value = data.tenant;
-    if (el('token') && typeof data.token === 'string') el('token').value = data.token;
-  } catch (_err) {
-    // ignore malformed local cache in development
-  }
-}
-
-function persistAuth() {
-  try {
-    const { tenant, token } = auth();
-    window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ tenant, token }));
-  } catch (_err) {
-    // ignore storage failures
-  }
 }
 
 async function api(path, options = {}) {
@@ -744,12 +722,7 @@ on('btn-wizard-cancel', () => closeCreateWizard());
 on('btn-wizard-back', () => { collectWizardStep(); wizardStep = Math.max(1, wizardStep - 1); renderCreateWizard(); });
 on('btn-wizard-next', () => { collectWizardStep(); wizardStep = Math.min(3, wizardStep + 1); renderCreateWizard(); });
 on('btn-wizard-create', async () => { try { await createVmFromWizard(); } catch (err) { showToast({ event_type: 'ui.error', severity: 'error', occurred_at: new Date().toISOString(), resource: { type: 'vm', id: wizardDraft.id || '-' }, data: { status: 'failed', message: err.message } }); } });
-const tenantInput = el('tenant');
-if (tenantInput) tenantInput.addEventListener('input', persistAuth);
-const tokenInput = el('token');
-if (tokenInput) tokenInput.addEventListener('input', persistAuth);
 
-loadPersistedAuth();
 bindMenu();
 bindVmTabs();
 document.addEventListener('fullscreenchange', refreshConsoleFullscreenButton);

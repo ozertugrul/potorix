@@ -6,23 +6,12 @@
     <title>Potorix Embedded Console</title>
     <style>
       html, body { margin: 0; height: 100%; background: #0b1220; color: #d6e2ff; font-family: Inter, system-ui, sans-serif; }
-      #bar { padding: 8px 10px; background: #111a2b; border-bottom: 1px solid #23314c; font-size: 12px; display: flex; gap: 10px; align-items: center; }
-      #bar .spacer { flex: 1; }
-      #bar select { background: #0f1727; color: #d6e2ff; border: 1px solid #2b3b5c; border-radius: 6px; padding: 2px 6px; }
+      #bar { padding: 8px 10px; background: #111a2b; border-bottom: 1px solid #23314c; font-size: 12px; }
       #screen { width: 100vw; height: calc(100vh - 34px); display: block; image-rendering: pixelated; background: #000; }
     </style>
   </head>
   <body>
-    <div id="bar">
-      <span>Console: <span id="status">connecting...</span></span>
-      <span class="spacer"></span>
-      <label for="profile">Profile</label>
-      <select id="profile">
-        <option value="latency">Low Latency</option>
-        <option value="balanced">Balanced</option>
-        <option value="quality">High Quality</option>
-      </select>
-    </div>
+    <div id="bar">Console: <span id="status">connecting...</span></div>
     <div id="screen"></div>
     <script type="module">
       import RFB from '/novnc-vendor/core/rfb.js';
@@ -44,29 +33,6 @@
       }
 
       const params = parseParams();
-      const profileEl = document.getElementById('profile');
-      let rfb;
-
-      function applyProfile(profile) {
-        if (!rfb) return;
-        if (profile === 'quality') {
-          rfb.scaleViewport = true;
-          rfb.resizeSession = true;
-          rfb.qualityLevel = 9;
-          rfb.compressionLevel = 2;
-        } else if (profile === 'balanced') {
-          rfb.scaleViewport = true;
-          rfb.resizeSession = false;
-          rfb.qualityLevel = 6;
-          rfb.compressionLevel = 4;
-        } else {
-          rfb.scaleViewport = false;
-          rfb.resizeSession = false;
-          rfb.qualityLevel = 4;
-          rfb.compressionLevel = 7;
-        }
-      }
-
       if (!params.tenant || !params.token || !params.vmId) {
         setStatus('missing tenant/token/vm_id');
       } else {
@@ -74,10 +40,10 @@
         const wsUrl = `${protocol}://${window.location.host}/ws/vnc?tenant=${encodeURIComponent(params.tenant)}&token=${encodeURIComponent(params.token)}&vm_id=${encodeURIComponent(params.vmId)}`;
         setStatus(`connecting via ${wsUrl}`);
         try {
-          rfb = new RFB(document.getElementById('screen'), wsUrl);
+          const rfb = new RFB(document.getElementById('screen'), wsUrl);
+          rfb.scaleViewport = true;
+          rfb.resizeSession = true;
           rfb.viewOnly = false;
-          applyProfile('latency');
-          profileEl.addEventListener('change', () => applyProfile(profileEl.value));
           rfb.addEventListener('connect', () => { setStatus('connected'); });
           rfb.addEventListener('disconnect', (e) => {
             const clean = !!(e && e.detail && e.detail.clean);
