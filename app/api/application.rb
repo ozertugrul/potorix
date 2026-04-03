@@ -127,6 +127,9 @@ class Application < Sinatra::Base
 
     ws = Faye::WebSocket.new(env, nil, ping: 20)
     socket = TCPSocket.new(target_host, port)
+    socket.sync = true
+    socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
+    socket.setsockopt(Socket::SOL_SOCKET, Socket::SO_KEEPALIVE, 1)
     logger.info("[ws/vnc] tcp_connected tenant=#{tenant_id} vm=#{vm_id} target=#{target_host}:#{port}")
 
     reader = Thread.new do
