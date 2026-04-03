@@ -10,6 +10,8 @@ let wizardDraft = {};
 let refreshInFlightPromise = null;
 let refreshQueued = false;
 let realtimeRefreshTimer = null;
+const DEV_AUTH_DEFAULTS = Object.freeze({ tenant: 'tenant-a', token: 'dev-admin-key' });
+const AUTH_STORAGE_KEYS = Object.freeze({ tenant: 'potorix.auth.tenant', token: 'potorix.auth.token' });
 
 const viewTitles = {
   dashboard: 'Control Plane Dashboard',
@@ -23,18 +25,111 @@ const viewTitles = {
 };
 
 function auth() {
-  const tenant = el('tenant').value.trim();
-  const token = el('token').value.trim();
+  const tenantInput = el('tenant');
+  const tokenInput = el('token');
+  const tenant = (tenantInput?.value || '').trim() || DEV_AUTH_DEFAULTS.tenant;
+  const token = (tokenInput?.value || '').trim() || DEV_AUTH_DEFAULTS.token;
+  if (tenantInput && !tenantInput.value.trim()) tenantInput.value = tenant;
+  if (tokenInput && !tokenInput.value.trim()) tokenInput.value = token;
   return { tenant, token, headers: { 'X-Tenant-ID': tenant, 'X-API-Key': token } };
 }
 
-async function api(path, options = {}) {
-  const { tenant, token, headers } = auth();
+function loadStoredAuth() {
+  try {
+    return {
+      tenant: localStorage.getItem(AUTH_STORAGE_KEYS.tenant) || '',
+      token: localStorage.getItem(AUTH_STORAGE_KEYS.token) || '',
+    };
+  } catch (_err) {
+    return { tenant: '', token: '' };
+  }
+}
+
+function persistAuth() {
+  const tenant = (el('tenant')?.value || '').trim();
+  const token = (el('token')?.value || '').trim();
+  try {
+    localStorage.setItem(AUTH_STORAGE_KEYS.tenant, tenant);
+    localStorage.setItem(AUTH_STORAGE_KEYS.token, token);
+  } catch (_err) {
+    // Ignore storage issues in restricted browser environments.
+  }
+}
+
+function initializeAuthDefaults() {
+  const tenantInput = el('tenant');
+  const tokenInput = el('token');
+  if (!tenantInput || !tokenInput) return;
+
+  const stored = loadStoredAuth();
+  tenantInput.value = (stored.tenant || '').trim() || DEV_AUTH_DEFAULTS.tenant;
+  tokenInput.value = (stored.token || '').trim() || DEV_AUTH_DEFAULTS.token;
+
+  const handleAuthInput = () => persistAuth();
+  tenantInput.addEventListener('input', handleAuthInput);
+  tokenInput.addEventListener('input', handleAuthInput);
+  tenantInput.addEventListener('change', handleAuthInput);
+  tokenInput.addEventListener('change', handleAuthInput);
+  window.addEventListener('beforeunload', persistAuth);
+
+  const submitOnEnter = async (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    persistAuth();
+    await refresh();
+    connectRealtime();
+  };
+  tenantInput.addEventListener('keydown', submitOnEnter);
+  tokenInput.addEventListener('keydown', submitOnEnter);
+
+  tenantInput.title = 'Development mode: value is saved in this browser';
+  tokenInput.title = 'Development mode: value is saved in this browser';
+  persistAuth();
+}
+
+async function fetchApi(path, options, tenant, token) {
   const url = new URL(path, window.location.origin);
   url.searchParams.set('tenant', tenant);
   url.searchParams.set('token', token);
-  const res = await fetch(url.toString(), { ...options, headers: { ...headers, ...(options.headers || {}) } });
-  const data = await res.json();
+
+  const res = await fetch(url.toString(), {
+    ...options,
+    headers: {
+      'X-Tenant-ID': tenant,
+      'X-API-Key': token,
+      ...(options.headers || {}),
+    },
+  });
+
+  const rawBody = await res.text();
+  let data = {};
+  try {
+    data = rawBody ? JSON.parse(rawBody) : {};
+  } catch (_err) {
+    data = { error: rawBody || 'Invalid response body' };
+  }
+
+  return { res, data };
+}
+
+async function api(path, options = {}) {
+  const { tenant, token } = auth();
+  let usedTenant = tenant;
+  let usedToken = token;
+  let { res, data } = await fetchApi(path, options, usedTenant, usedToken);
+
+  const canFallbackToDev = usedTenant !== DEV_AUTH_DEFAULTS.tenant || usedToken !== DEV_AUTH_DEFAULTS.token;
+  if ((res.status === 401 || res.status === 403) && canFallbackToDev) {
+    const tenantInput = el('tenant');
+    const tokenInput = el('token');
+    usedTenant = DEV_AUTH_DEFAULTS.tenant;
+    usedToken = DEV_AUTH_DEFAULTS.token;
+    if (tenantInput) tenantInput.value = usedTenant;
+    if (tokenInput) tokenInput.value = usedToken;
+    persistAuth();
+    ({ res, data } = await fetchApi(path, options, usedTenant, usedToken));
+  }
+
   if (!res.ok) throw new Error(data.error || 'API error');
   return data.data;
 }
@@ -398,13 +493,19 @@ async function loadVncInfo() {
 }
 
 function openConsoleForVm(vmId) {
-  const tenant = el('tenant').value.trim();
-  const token = el('token').value.trim();
+  const { tenant, token } = auth();
   if (!vmId || !tenant || !token) throw new Error('VM, tenant ve token gerekli');
   const frame = el('console-frame');
+  frame.onload = () => notifyConsoleFrameLayout();
   frame.src = `/novnc.html?tenant=${encodeURIComponent(tenant)}&token=${encodeURIComponent(token)}&vm_id=${encodeURIComponent(vmId)}`;
   currentConsoleVmId = vmId;
   el('vnc-info').textContent = `Embedded console loading for VM: ${vmId}`;
+}
+
+function notifyConsoleFrameLayout() {
+  const frame = el('console-frame');
+  if (!frame || !frame.contentWindow) return;
+  frame.contentWindow.postMessage({ type: 'potorix.console.layout' }, window.location.origin);
 }
 
 function updateConsoleOverlay(vmDetail) {
@@ -437,18 +538,28 @@ function syncConsoleToSelectedVm() {
 async function toggleConsoleFullscreen() {
   const frame = el('console-frame');
   if (!frame) return;
-  const target = frame.parentElement || frame;
-  if (document.fullscreenElement) {
-    await document.exitFullscreen();
-  } else if (target.requestFullscreen) {
-    await target.requestFullscreen();
+  const target = frame.closest('.console-wrap') || frame.parentElement || frame;
+  const activeFullscreen = document.fullscreenElement || document.webkitFullscreenElement;
+  if (activeFullscreen) {
+    if (document.exitFullscreen) await document.exitFullscreen();
+    else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    setTimeout(notifyConsoleFrameLayout, 80);
+    return;
   }
+
+  if (target.requestFullscreen) {
+    await target.requestFullscreen();
+  } else if (target.webkitRequestFullscreen) {
+    target.webkitRequestFullscreen();
+  }
+  setTimeout(notifyConsoleFrameLayout, 80);
 }
 
 function refreshConsoleFullscreenButton() {
   const btn = el('btn-console-fullscreen');
   if (!btn) return;
-  btn.textContent = document.fullscreenElement ? 'Exit Fullscreen' : 'Fullscreen';
+  const activeFullscreen = document.fullscreenElement || document.webkitFullscreenElement;
+  btn.textContent = activeFullscreen ? 'Exit Fullscreen' : 'Fullscreen';
 }
 
 async function waitForVnc(vmId) {
@@ -680,8 +791,9 @@ async function createVmFromWizard() {
 
 function connectRealtime() {
   if (socket) socket.close();
-  const tenant = encodeURIComponent(el('tenant').value.trim());
-  const token = encodeURIComponent(el('token').value.trim());
+  const { tenant: authTenant, token: authToken } = auth();
+  const tenant = encodeURIComponent(authTenant);
+  const token = encodeURIComponent(authToken);
   const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
   socket = new WebSocket(`${protocol}://${window.location.host}/ws?tenant=${tenant}&token=${token}`);
   socket.onmessage = (raw) => {
@@ -694,7 +806,7 @@ function connectRealtime() {
 }
 
 const on = (id, fn) => { const n = el(id); if (n) n.onclick = fn; };
-on('refresh', async () => { await refresh(); connectRealtime(); });
+on('refresh', async () => { persistAuth(); await refresh(); connectRealtime(); });
 on('btn-create-vm', async () => { try { await createVm(); await refresh(); } catch (err) { showToast({ event_type: 'ui.error', severity: 'error', occurred_at: new Date().toISOString(), resource: { type: 'vm', id: el('vm-id').value.trim() }, data: { status: 'failed', message: err.message } }); } });
 on('btn-run-backup', async () => { try { await runBackup(); await refresh(); } catch (err) { showToast({ event_type: 'ui.error', severity: 'error', occurred_at: new Date().toISOString(), resource: { type: 'backup', id: el('vm-id').value.trim() }, data: { status: 'failed', message: err.message } }); } });
 on('btn-snapshot-list', async () => { try { await listSnapshots(); } catch (err) { showToast({ event_type: 'ui.error', severity: 'error', occurred_at: new Date().toISOString(), resource: { type: 'snapshot', id: el('snapshot-vm-id').value.trim() || '-' }, data: { status: 'failed', message: err.message } }); } });
@@ -725,7 +837,14 @@ on('btn-wizard-create', async () => { try { await createVmFromWizard(); } catch 
 
 bindMenu();
 bindVmTabs();
-document.addEventListener('fullscreenchange', refreshConsoleFullscreenButton);
+const onFullscreenChanged = () => {
+  refreshConsoleFullscreenButton();
+  notifyConsoleFrameLayout();
+};
+document.addEventListener('fullscreenchange', onFullscreenChanged);
+document.addEventListener('webkitfullscreenchange', onFullscreenChanged);
+window.addEventListener('resize', notifyConsoleFrameLayout);
 refreshConsoleFullscreenButton();
+initializeAuthDefaults();
 refresh();
 connectRealtime();

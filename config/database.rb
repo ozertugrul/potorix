@@ -18,13 +18,23 @@ end
 
 DB = connect_with_retry
 
-def ensure_table(name)
+def ensure_table(name, &block)
   return if DB.table_exists?(name)
 
   begin
-    DB.create_table(name) { yield }
+    DB.create_table(name, &block)
   rescue Sequel::DatabaseError
     raise unless DB.table_exists?(name)
+  end
+end
+
+def ensure_index(table, columns, name:)
+  return if DB.indexes(table).key?(name)
+
+  begin
+    DB.add_index(table, columns, name: name)
+  rescue Sequel::DatabaseError
+    raise unless DB.indexes(table).key?(name)
   end
 end
 
@@ -65,7 +75,7 @@ ensure_table(:vm_operations) do
   index :tenant_id
   index :status
 end
-DB.add_index(:vm_operations, %i[tenant_id id], name: :vm_operations_tenant_id_id_idx) unless DB.indexes(:vm_operations).key?(:vm_operations_tenant_id_id_idx)
+ensure_index(:vm_operations, %i[tenant_id id], name: :vm_operations_tenant_id_id_idx)
 
 ensure_table(:audit_logs) do
   primary_key :id
@@ -80,7 +90,7 @@ ensure_table(:audit_logs) do
   DateTime :created_at, null: false
   index :tenant_id
 end
-DB.add_index(:audit_logs, %i[tenant_id id], name: :audit_logs_tenant_id_id_idx) unless DB.indexes(:audit_logs).key?(:audit_logs_tenant_id_id_idx)
+ensure_index(:audit_logs, %i[tenant_id id], name: :audit_logs_tenant_id_id_idx)
 
 ensure_table(:agents) do
   primary_key :id
@@ -133,7 +143,7 @@ ensure_table(:app_installs) do
   index :tenant_id
   index :status
 end
-DB.add_index(:app_installs, %i[tenant_id id], name: :app_installs_tenant_id_id_idx) unless DB.indexes(:app_installs).key?(:app_installs_tenant_id_id_idx)
+ensure_index(:app_installs, %i[tenant_id id], name: :app_installs_tenant_id_id_idx)
 
 ensure_table(:backup_policies) do
   primary_key :id
@@ -169,4 +179,4 @@ ensure_table(:backup_runs) do
   index :tenant_id
   index :status
 end
-DB.add_index(:backup_runs, %i[tenant_id id], name: :backup_runs_tenant_id_id_idx) unless DB.indexes(:backup_runs).key?(:backup_runs_tenant_id_id_idx)
+ensure_index(:backup_runs, %i[tenant_id id], name: :backup_runs_tenant_id_id_idx)

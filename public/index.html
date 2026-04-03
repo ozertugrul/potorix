@@ -25,8 +25,8 @@
       <header class="topbar">
         <h1 id="view-title">Control Plane Dashboard</h1>
         <div class="auth-box">
-          <input id="tenant" value="" placeholder="Tenant ID" />
-          <input id="token" value="" placeholder="API Key" />
+          <input id="tenant" value="tenant-a" placeholder="Tenant ID" autocomplete="on" />
+          <input id="token" value="dev-admin-key" placeholder="API Key" autocomplete="on" />
           <button id="refresh">Refresh</button>
         </div>
       </header>
@@ -174,7 +174,7 @@
                         <button id="btn-console-run">Run</button>
                       </div>
                     </div>
-                    <iframe id="console-frame" title="VM Console" src="/novnc.html"></iframe>
+                    <iframe id="console-frame" title="VM Console" src="/novnc.html" allow="fullscreen" allowfullscreen></iframe>
                   </div>
                 </section>
                 <section id="vm-tab-tasks" class="pve-tab-panel">
