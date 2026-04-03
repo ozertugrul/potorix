@@ -39,7 +39,8 @@ Potorix is a Proxmox-inspired virtualization panel for managing tenant-scoped VM
 
 - API access requires `X-API-Key` and `X-Tenant-ID`.
 - Keep production keys in `.env` only (never commit `.env`).
-- Default UI no longer pre-fills API keys.
+- In development, the UI can pre-fill `tenant-a` and `dev-admin-key`, and stores current auth inputs in browser `localStorage`.
+- For production, use strong keys and override development defaults.
 - WebSocket endpoints enforce auth and tenant scope checks.
 
 ## Quick Start (Docker)
@@ -47,6 +48,8 @@ Potorix is a Proxmox-inspired virtualization panel for managing tenant-scoped VM
 ```bash
 cp .env.example .env
 # edit AUTH_TOKENS in .env with strong random keys
+# optional local dev profile:
+# AUTH_TOKENS=admin:dev-admin-key,operator:dev-operator-key,viewer:dev-viewer-key
 
 docker compose build
 docker compose up -d
@@ -78,6 +81,18 @@ Example `AUTH_TOKENS` format:
 ```env
 AUTH_TOKENS=admin:<strong-admin-key>,operator:<strong-operator-key>,viewer:<strong-viewer-key>
 ```
+
+Optional environment variables (with defaults):
+
+- `DB_CONNECT_RETRIES` (default: `30`)
+- `DB_CONNECT_DELAY` (default: `2`)
+- `RAILS_MAX_THREADS` (default: `5`)
+
+## Development UX Notes
+
+- Auth inputs (`Tenant ID`, `API Key`) are persisted in browser `localStorage`.
+- Pressing `Enter` in auth inputs triggers refresh and reconnects realtime WebSocket.
+- Console fullscreen uses iframe + noVNC responsive scaling.
 
 ## API Overview
 
