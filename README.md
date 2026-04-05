@@ -14,16 +14,16 @@
   <img src="https://skillicons.dev/icons?i=ruby,postgres,redis,docker,linux" alt="Ruby, PostgreSQL, Redis, Docker, Linux" />
 </p>
 
-Potorix is a Proxmox-inspired virtualization panel for managing tenant-scoped VMs on libvirt/KVM hosts. It provides a real-time web UI, asynchronous VM lifecycle jobs, audit trails, and an embedded browser console (noVNC over same-origin WebSocket proxy).
+Potorix is a Proxmox-inspired virtualization panel for managing tenant-scoped VMs on libvirt/KVM hosts. It provides a real-time web UI, asynchronous VM lifecycle jobs, audit trails, and an embedded browser console (noVNC with ticketed `websockify` sidecar).
 
 ## Features
 
-- Tenant-scoped VM management (`create`, `start`, `stop/poweroff`, `destroy`)
+- Tenant-scoped VM management (`create`, `start`, `stop/poweroff`, `destroy`, `purge`)
 - Snapshot operations (`create`, `revert`)
 - ISO workflow (`library`, `attach`, `detach`, `boot order`)
 - Offline VM tuning (vCPU, memory, disk resize + extra host disk attach)
 - Real-time event stream for jobs and audit logs (`/ws`)
-- Embedded browser console for running VMs (`/ws/vnc` + `novnc.html`)
+- Embedded browser console for running VMs (`/api/v1/vms/:id/console-ticket` + `novnc.html`)
 - Queue-driven orchestration with Sidekiq workers
 
 ## Architecture
@@ -33,13 +33,13 @@ Potorix is a Proxmox-inspired virtualization panel for managing tenant-scoped VM
 - **Hypervisor Adapter:** `virsh` integration (`app/services/hypervisor/virsh_adapter.rb`)
 - **Persistence:** PostgreSQL via Sequel
 - **Queue + Realtime Pub/Sub:** Redis
-- **Frontend:** Static SPA (`public/index.html`, `public/app.js`, `public/styles.css`)
+- **Frontend:** React SPA (source in `frontend/`, build output in `public/`)
 
 ## Security Notes
 
 - API access requires `X-API-Key` and `X-Tenant-ID`.
 - Keep production keys in `.env` only (never commit `.env`).
-- In development, the UI can pre-fill `tenant-a` and `dev-admin-key`, and stores current auth inputs in browser `localStorage`.
+- In development, the UI can pre-fill sample tenant/token values and stores current auth inputs in browser `localStorage`.
 - For production, use strong keys and override development defaults.
 - WebSocket endpoints enforce auth and tenant scope checks.
 
@@ -49,7 +49,7 @@ Potorix is a Proxmox-inspired virtualization panel for managing tenant-scoped VM
 cp .env.example .env
 # edit AUTH_TOKENS in .env with strong random keys
 # optional local dev profile:
-# AUTH_TOKENS=admin:dev-admin-key,operator:dev-operator-key,viewer:dev-viewer-key
+# AUTH_TOKENS=admin:<dev-admin-token>,operator:<dev-operator-token>,viewer:<dev-viewer-token>
 
 docker compose build
 docker compose up -d
@@ -60,6 +60,25 @@ curl http://localhost:9292/health
 Open:
 
 - `http://localhost:9292/`
+
+## Frontend Development
+
+Frontend source lives in `frontend/` and is bundled by Vite into `public/` (served by Sinatra).
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+For local UI development:
+
+```bash
+cd frontend
+npm run dev
+```
+
+Production Docker builds automatically run `npm install` and `npm run build` before starting Puma.
 
 ## Required Environment
 
@@ -104,19 +123,34 @@ Core endpoints:
 - `POST /api/v1/vms/:id/start`
 - `POST /api/v1/vms/:id/stop`
 - `DELETE /api/v1/vms/:id`
+- `POST /api/v1/vms/:id/purge`
 - `POST /api/v1/vms/:id/attach-iso`
 - `POST /api/v1/vms/:id/detach-iso`
 - `POST /api/v1/vms/:id/boot-order`
 - `POST /api/v1/vms/:id/reconfigure`
 - `POST /api/v1/vms/:id/disks`
 - `GET /api/v1/vms/:id/vnc`
+- `POST /api/v1/vms/:id/console-ticket`
+- `GET /api/v1/vms/:id/operations`
+- `GET /api/v1/vms/:id/usage`
+- `GET /api/v1/iso-library`
+- `POST /api/v1/iso-library/import`
+- `POST /api/v1/iso-library/upload`
 - `GET /api/v1/jobs`
 - `GET /api/v1/audit-logs`
 
 Realtime:
 
 - `GET /ws?tenant=<tenant>&token=<api-key>` (WebSocket)
-- `GET /ws/vnc?tenant=<tenant>&token=<api-key>&vm_id=<vm-id>` (WebSocket tunnel)
+- `GET /ws/vnc?tenant=<tenant>&token=<api-key>&vm_id=<vm-id>` (legacy WebSocket tunnel)
+
+Console fast path (recommended): frontend requests `/api/v1/vms/:id/console-ticket`, then noVNC connects to sidecar on `:6080` with short-lived token.
+
+## Destructive Operations
+
+- `DELETE /api/v1/vms/:id` queues standard VM destroy flow.
+- `POST /api/v1/vms/:id/purge` queues irreversible cleanup (domain + disk artifacts + tenant-scoped records).
+- Treat **Purge** as non-recoverable.
 
 ## Host Requirements (Real KVM Mode)
 
