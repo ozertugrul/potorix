@@ -1,4 +1,17 @@
 services:
+  vnc-proxy:
+    build: .
+    command:
+      - sh
+      - -lc
+      - mkdir -p /tmp/websockify && rm -f /tmp/websockify/tokens && touch /tmp/websockify/tokens && websockify --verbose --token-plugin TokenFile --token-source /tmp/websockify/tokens 0.0.0.0:6080
+    ports:
+      - '6080:6080'
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /tmp/potorix-websockify:/tmp/websockify
+
   api:
     build: .
     command: bundle exec puma -b tcp://0.0.0.0:9292 config.ru
@@ -6,6 +19,7 @@ services:
       - .env
     environment:
       VNC_PROXY_TARGET_HOST: host.docker.internal
+      WEBSOCKIFY_TOKEN_FILE: /tmp/websockify/tokens
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -16,10 +30,13 @@ services:
       - /var/run/libvirt:/var/run/libvirt
       - /var/lib/libvirt/images:/var/lib/libvirt/images
       - /var/lib/libvirt/boot:/var/lib/libvirt/boot
+      - /tmp/potorix-websockify:/tmp/websockify
     depends_on:
       db:
         condition: service_healthy
       redis:
+        condition: service_started
+      vnc-proxy:
         condition: service_started
 
   worker:

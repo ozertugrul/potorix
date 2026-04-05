@@ -21,6 +21,10 @@ class VmLifecycleJob
         network_mode: payload.fetch('network_mode', 'network'),
         network_source: payload.fetch('network_source', payload.fetch('network', 'default'))
       )
+      adapter.set_autostart(vm_id, payload['start_at_boot']) if payload.key?('start_at_boot')
+      if payload['snapshot_on_create'] && payload['snapshot_on_create_name'].to_s != ''
+        adapter.snapshot_create(vm_id, payload['snapshot_on_create_name'].to_s)
+      end
       DB[:tenant_vms].insert_conflict(target: %i[tenant_id vm_id], update: { vm_id: Sequel[:excluded][:vm_id] })
                     .insert(tenant_id: tenant, vm_id: vm_id, created_at: Time.now.utc)
     when 'start'
@@ -30,6 +34,11 @@ class VmLifecycleJob
     when 'destroy'
       adapter.destroy_domain(vm_id)
       DB[:tenant_vms].where(tenant_id: tenant, vm_id: vm_id).delete
+    when 'purge'
+      adapter.purge_domain(vm_id)
+      DB[:tenant_vms].where(tenant_id: tenant, vm_id: vm_id).delete
+      DB[:vm_profiles].where(tenant_id: tenant, vm_id: vm_id).delete
+      DB[:backup_runs].where(tenant_id: tenant, vm_id: vm_id).delete
     when 'snapshot_create'
       adapter.snapshot_create(vm_id, payload.fetch('snapshot_name'))
     when 'snapshot_revert'

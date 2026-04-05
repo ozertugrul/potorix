@@ -46,6 +46,12 @@ module Hypervisor
       undefine_with_fallback(vm)
     end
 
+    def purge_domain(domain_id)
+      vm = clean(domain_id)
+      destroy_domain(vm)
+      purge_disk_artifacts(vm)
+    end
+
     def start(domain_id)
       run('start', clean(domain_id))
     rescue CommandError => e
@@ -55,6 +61,10 @@ module Hypervisor
         run('start', clean(domain_id))
       elsif msg.include?("Cannot get interface MTU on 'default': No such device")
         migrate_legacy_default_bridge_interface(clean(domain_id))
+        ensure_network_active('default')
+        run('start', clean(domain_id))
+      elsif msg.include?('Cannot get interface MTU on') && msg.include?(': No such device')
+        migrate_missing_bridge_to_default_network(clean(domain_id))
         ensure_network_active('default')
         run('start', clean(domain_id))
       elsif msg.include?('Domain is already active')
@@ -146,6 +156,16 @@ module Hypervisor
                 end
       with_tempfile(updated) { |path| run('define', path) }
       { primary: primary_dev }
+    end
+
+    def set_autostart(domain_id, enabled)
+      vm = clean(domain_id)
+      if enabled
+        run('autostart', vm)
+      else
+        run('autostart', vm, '--disable')
+      end
+      { autostart: !!enabled }
     end
 
     def vm_details(domain_id)
@@ -306,6 +326,10 @@ module Hypervisor
             #{install_cdrom}
             #{network_interface}
             <graphics type='vnc' autoport='yes' listen='0.0.0.0'/>
+            <video>
+              <model type='virtio' vram='16384' heads='1' primary='yes'/>
+            </video>
+            <sound model='ich9'/>
             <console type='pty'/>
           </devices>
         </domain>
@@ -340,6 +364,20 @@ module Hypervisor
       with_tempfile(migrated) { |path| run('define', path) }
     end
 
+    def migrate_missing_bridge_to_default_network(domain_id)
+      xml = run('dumpxml', clean(domain_id))
+      migrated = xml.gsub(
+        /<interface type='bridge'>\s*(<mac address='[^']+'\/>\s*)?<source bridge='[^']+'\/>\s*<model type='([^']+)'\/>/m
+      ) do
+        mac = Regexp.last_match(1).to_s
+        model = Regexp.last_match(2).to_s
+        "<interface type='network'>\n      #{mac}<source network='default'/>\n      <model type='#{model.empty? ? 'virtio' : model}'/>"
+      end
+      return if migrated == xml
+
+      with_tempfile(migrated) { |path| run('define', path) }
+    end
+
     def cleanup_snapshots(domain_id)
       snaps = snapshot_list(domain_id)
       snaps.each do |name|
@@ -366,6 +404,16 @@ module Hypervisor
 
       disk_dir = ENV.fetch('VM_DISK_DIR', '/var/lib/libvirt/images')
       FileUtils.rm_f(File.join(disk_dir, "#{clean(domain_id)}.qcow2"))
+    end
+
+    def purge_disk_artifacts(domain_id)
+      vm = clean(domain_id)
+      disk_dir = ENV.fetch('VM_DISK_DIR', '/var/lib/libvirt/images')
+      Dir.glob(File.join(disk_dir, "#{vm}*")).each do |path|
+        next unless File.file?(path)
+
+        FileUtils.rm_f(path)
+      end
     end
 
     def managed_disk_paths(domain_id)

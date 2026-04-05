@@ -59,6 +59,16 @@ ensure_table(:tenant_vms) do
   index %i[tenant_id vm_id], unique: true
 end
 
+ensure_table(:vm_profiles) do
+  primary_key :id
+  String :tenant_id, null: false
+  String :vm_id, null: false
+  Text :config_json, null: false, default: '{}'
+  DateTime :created_at, null: false
+  DateTime :updated_at, null: false
+  index %i[tenant_id vm_id], unique: true
+end
+
 ensure_table(:vm_operations) do
   primary_key :id
   String :tenant_id, null: false
