@@ -12,9 +12,17 @@ export function useVmDetailQuery(vmId: string | null) {
 export function useVmMetricsQuery(vmId: string | null) {
   return useQuery({
     queryKey: ['vm-metrics', vmId],
-    queryFn: () => backendVmApi.getMetrics(vmId!),
+    queryFn: () => backendVmApi.getVmMetricsHistory(vmId!),
     enabled: Boolean(vmId),
     refetchInterval: 4000
+  });
+}
+
+export function useSystemMetricsQuery() {
+  return useQuery({
+    queryKey: ['system-metrics-history'],
+    queryFn: () => backendVmApi.getSystemMetricsHistory(),
+    refetchInterval: 5000
   });
 }
 

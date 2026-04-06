@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { Area, AreaChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { Activity, ArrowUpDown, Copy, HardDrive, LayoutDashboard, Monitor, Play, Power, RotateCcw, Server, Shield, Trash2, Camera, Terminal, PowerOff, Rocket, PauseCircle, PlusCircle } from 'lucide-react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useIsoLibraryQuery, useSystemUsageQuery, useVmMetricsQuery, useVmDetailQuery, useVmOperationsQuery, useVmsQuery } from '../hooks/useVmQueries';
+import { useIsoLibraryQuery, useSystemMetricsQuery, useSystemUsageQuery, useVmMetricsQuery, useVmDetailQuery, useVmOperationsQuery, useVmsQuery } from '../hooks/useVmQueries';
 import { useVmAction } from '../hooks/useVmActions';
 import { useVmStore } from '../store/vmStore';
 import { useToastStore } from '../store/toastStore';
@@ -54,6 +54,7 @@ type CreateVmForm = {
   startAtBoot: boolean;
   firewallEnabled: boolean;
   snapshotOnCreate: boolean;
+  storagePool: string;
 };
 
 const defaultCreateVmForm: CreateVmForm = {
@@ -81,6 +82,7 @@ const defaultCreateVmForm: CreateVmForm = {
   startAtBoot: true,
   firewallEnabled: true,
   snapshotOnCreate: false
+  ,storagePool: 'default'
 };
 
 type SidebarView = 'dashboard' | 'resources' | 'images';
@@ -97,8 +99,12 @@ export function VmDetailPage() {
   const [newTag, setNewTag] = useState('');
   const [newRule, setNewRule] = useState({ direction: 'IN', action: 'ACCEPT', source: '0.0.0.0/0', destination: '10.0.0.10', port: '443' });
   const [createVmForm, setCreateVmForm] = useState<CreateVmForm>(defaultCreateVmForm);
+  const [cloneOpen, setCloneOpen] = useState(false);
+  const [cloneTargetId, setCloneTargetId] = useState('');
+  const [cloneType, setCloneType] = useState<'full' | 'linked'>('full');
   const [createStep, setCreateStep] = useState(0);
   const [showAdvancedCreate, setShowAdvancedCreate] = useState(false);
+  const [storagePools, setStoragePools] = useState<Array<{ name: string; state: string }>>([]);
   const [isoImportSourcePath, setIsoImportSourcePath] = useState('');
   const [isoUploadFile, setIsoUploadFile] = useState<File | null>(null);
 
@@ -113,6 +119,7 @@ export function VmDetailPage() {
   const vmQuery = useVmDetailQuery(selectedVmId);
   const metricsQuery = useVmMetricsQuery(selectedVmId);
   const systemUsageQuery = useSystemUsageQuery();
+  const systemMetricsQuery = useSystemMetricsQuery();
   const isoLibraryQuery = useIsoLibraryQuery();
   const vmOperationsQuery = useVmOperationsQuery(selectedVmId);
 
@@ -131,15 +138,26 @@ export function VmDetailPage() {
   }, [allVms]);
 
   const dashboardSeries = useMemo(() => {
-    const cpuBase = Math.round((((systemUsageQuery.data?.tenant.alloc_vcpus || 0) / Math.max(systemUsageQuery.data?.host.cpu_total || 1, 1)) * 100));
-    const ramBase = Math.round((((systemUsageQuery.data?.tenant.alloc_memory_mb || 0) / Math.max(systemUsageQuery.data?.host.memory_total_mb || 1, 1)) * 100));
-    return Array.from({ length: 16 }).map((_, idx) => ({
-      time: `${idx * 5}m`,
-      cpu: Math.min(100, Math.max(0, cpuBase + (idx % 5))),
-      ram: Math.min(100, Math.max(0, ramBase + (idx % 4))),
-      net: 8 + ((idx * 3) % 25)
+    return (systemMetricsQuery.data || []).map((m) => ({
+      created_at: m.created_at,
+      cpu: Number(m.cpu_usage_pct || 0),
+      ram: Number(m.ram_usage_pct || 0),
+      load: Number(m.load_avg_1m || 0),
+      net_rx_mbps: (Number(m.net_rx_bytes_sec || 0) * 8) / 1_000_000,
+      net_tx_mbps: (Number(m.net_tx_bytes_sec || 0) * 8) / 1_000_000
     }));
-  }, [systemUsageQuery.data]);
+  }, [systemMetricsQuery.data]);
+
+  const vmMetricSeries = useMemo(() => {
+    return (metricsQuery.data || []).map((m) => ({
+      created_at: m.created_at,
+      cpu: Number(m.cpu_usage_pct || 0),
+      ram: Number(m.ram_usage_pct || 0),
+      disk_iops: Number(m.disk_iops || 0),
+      net_rx_mbps: (Number(m.net_rx_bytes_sec || 0) * 8) / 1_000_000,
+      net_tx_mbps: (Number(m.net_tx_bytes_sec || 0) * 8) / 1_000_000
+    }));
+  }, [metricsQuery.data]);
 
   const hostSummary = useMemo(() => {
     const running = allVms.filter((item) => item.status === 'running').length;
@@ -293,6 +311,19 @@ export function VmDetailPage() {
     setCreateVmForm((s) => ({ ...s, id: suggestedNextVmId, isoPath: s.isoPath || preferredIso }));
   };
 
+  useEffect(() => {
+    backendVmApi.getStoragePools()
+      .then((rows) => {
+        setStoragePools(rows.map((r) => ({ name: r.name, state: r.state })));
+        if (rows.length > 0) {
+          setCreateVmForm((s) => ({ ...s, storagePool: s.storagePool || rows[0].name }));
+        }
+      })
+      .catch(() => {
+        setStoragePools([{ name: 'default', state: 'active' }]);
+      });
+  }, []);
+
   const saveVmPatch = async (patch: Record<string, unknown>, successTitle: string) => {
     if (!vm) return;
     await backendVmApi.updateVm(vm.id, patch);
@@ -309,7 +340,7 @@ export function VmDetailPage() {
             <LayoutDashboard size={14} /> Dashboard
           </button>
           <button className={`tree-nav-btn ${sidebarView === 'resources' ? 'active' : ''}`} onClick={() => setSidebarView('resources')}>
-            <Server size={14} /> Resources
+            <Server size={14} /> VM
           </button>
           <button className={`tree-nav-btn ${sidebarView === 'images' ? 'active' : ''}`} onClick={() => setSidebarView('images')}>
             <HardDrive size={14} /> Images
@@ -377,11 +408,12 @@ export function VmDetailPage() {
                 <ResponsiveContainer width="100%" height={230}>
                   <AreaChart data={dashboardSeries}>
                     <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="time" />
-                    <YAxis />
-                    <Tooltip />
-                    <Area type="monotone" dataKey="cpu" stroke="#2563eb" fill="#93c5fd" fillOpacity={0.45} />
-                    <Area type="monotone" dataKey="ram" stroke="#22c55e" fill="#86efac" fillOpacity={0.3} />
+                    <XAxis dataKey="created_at" tickFormatter={(time) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} />
+                    <YAxis tickFormatter={(val) => `${val}%`} />
+                    <Tooltip formatter={(value: number) => `${Number(value).toFixed(1)}%`} labelFormatter={(label) => new Date(label).toLocaleString()} />
+                    <Legend verticalAlign="top" height={36} />
+                    <Area type="monotone" dataKey="cpu" name="CPU Yükü" stroke="#2563eb" fill="#93c5fd" fillOpacity={0.45} />
+                    <Area type="monotone" dataKey="ram" name="RAM Yükü" stroke="#22c55e" fill="#86efac" fillOpacity={0.3} />
                   </AreaChart>
                 </ResponsiveContainer>
               </Card>
@@ -390,10 +422,27 @@ export function VmDetailPage() {
                 <ResponsiveContainer width="100%" height={230}>
                   <AreaChart data={dashboardSeries}>
                     <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="time" />
+                    <XAxis dataKey="created_at" tickFormatter={(time) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} />
+                    <YAxis tickFormatter={(val) => `${Number(val).toFixed(1)} Mbps`} />
+                    <Tooltip formatter={(value: number) => `${Number(value).toFixed(2)} Mbps`} labelFormatter={(label) => new Date(label).toLocaleString()} />
+                    <Legend verticalAlign="top" height={36} />
+                    <Area type="monotone" dataKey="net_rx_mbps" name="RX Mbps" stroke="#f59e0b" fill="#fde68a" fillOpacity={0.35} />
+                    <Area type="monotone" dataKey="net_tx_mbps" name="TX Mbps" stroke="#ea580c" fill="#fdba74" fillOpacity={0.3} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </Card>
+            </div>
+
+            <div className="grid-2">
+              <Card title="Host Load Average (1m)">
+                <ResponsiveContainer width="100%" height={230}>
+                  <AreaChart data={dashboardSeries}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="created_at" tickFormatter={(time) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} />
                     <YAxis />
-                    <Tooltip />
-                    <Area type="monotone" dataKey="net" stroke="#f59e0b" fill="#fde68a" fillOpacity={0.35} />
+                    <Tooltip formatter={(value: number) => Number(value).toFixed(3)} labelFormatter={(label) => new Date(label).toLocaleString()} />
+                    <Legend verticalAlign="top" height={36} />
+                    <Area type="monotone" dataKey="load" name="Load Avg (1m)" stroke="#7c3aed" fill="#c4b5fd" fillOpacity={0.35} />
                   </AreaChart>
                 </ResponsiveContainer>
               </Card>
@@ -484,15 +533,17 @@ export function VmDetailPage() {
                 <Button icon={<RotateCcw size={15} />} loading={reboot.isPending || actionLoading.reboot} disabled={!canStop} onClick={() => reboot.mutate()}>Reboot</Button>
                 <Button icon={<PowerOff size={15} />} loading={shutdown.isPending || actionLoading.shutdown} disabled={!canStop} onClick={() => shutdown.mutate()}>Shutdown</Button>
                 <Button icon={<Terminal size={15} />} disabled={!vm} onClick={() => setTab('console')}>Console</Button>
-                <Button icon={<Copy size={15} />} disabled={!vm} onClick={async () => {
+                <Button icon={<Copy size={15} />} disabled={!vm} onClick={() => {
                   if (!vm) return;
-                  const defaultTarget = String(Number(vm.id) + 1);
-                  const targetId = window.prompt('Clone target VM ID', defaultTarget)?.trim() || '';
-                  if (!targetId) return;
-                  await backendVmApi.cloneVm(vm.id, targetId);
-                  queryClient.invalidateQueries({ queryKey: ['vms'] });
-                  pushToast({ kind: 'success', title: 'Clone queued', message: `${vm.id} -> ${targetId}` });
+                  setCloneTargetId(String(Number(vm.id) + 1));
+                  setCloneType('full');
+                  setCloneOpen(true);
                 }}>Clone</Button>
+                <Button icon={<Rocket size={15} />} disabled={!vm} onClick={async () => {
+                  if (!vm) return;
+                  await backendVmApi.markVmAsTemplate(vm.id);
+                  pushToast({ kind: 'success', title: 'Template enabled', message: `${vm.id} marked as template.` });
+                }}>Make Template</Button>
                 <Button icon={<ArrowUpDown size={15} />} disabled={!vm} onClick={async () => {
                   if (!vm) return;
                   const destination = window.prompt('Destination libvirt URI', 'qemu+ssh://root@target/system')?.trim() || '';
@@ -561,23 +612,25 @@ export function VmDetailPage() {
                     <Card title="VM Health Overview">
                       {metricsQuery.isLoading ? <Skeleton className="h-56" /> : (
                         <ResponsiveContainer width="100%" height={220}>
-                          <AreaChart data={metricsQuery.data || []}>
+                          <AreaChart data={vmMetricSeries}>
                             <defs><linearGradient id="cpu" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3b82f6" stopOpacity={0.8}/><stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/></linearGradient></defs>
                             <CartesianGrid strokeDasharray="3 3" />
-                            <XAxis dataKey="time" />
-                            <YAxis />
-                            <Tooltip />
-                            <Area type="monotone" dataKey="cpu" stroke="#3b82f6" fillOpacity={1} fill="url(#cpu)" />
+                            <XAxis dataKey="created_at" tickFormatter={(time) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} />
+                            <YAxis tickFormatter={(val) => `${val}%`} />
+                            <Tooltip formatter={(value: number) => `${Number(value).toFixed(1)}%`} labelFormatter={(label) => new Date(label).toLocaleString()} />
+                            <Legend verticalAlign="top" height={36} />
+                            <Area type="monotone" dataKey="cpu" name="CPU Yükü" stroke="#3b82f6" fillOpacity={1} fill="url(#cpu)" />
+                            <Area type="monotone" dataKey="ram" name="RAM Yükü" stroke="#22c55e" fillOpacity={0.3} fill="#86efac" />
                           </AreaChart>
                         </ResponsiveContainer>
                       )}
                     </Card>
                     <Card title="Summary Cards">
                       <div className="stats-grid">
-                        <div><span>CPU</span><strong>{(metricsQuery.data?.at(-1)?.cpu ?? 0)}%</strong></div>
-                        <div><span>RAM</span><strong>{(metricsQuery.data?.at(-1)?.ram ?? 0)}%</strong></div>
-                        <div><span>Disk IO</span><strong>{(metricsQuery.data?.at(-1)?.diskIo ?? 0)}%</strong></div>
-                        <div><span>Network</span><strong>{(metricsQuery.data?.at(-1)?.net ?? 0)}%</strong></div>
+                        <div><span>CPU</span><strong>{(vmMetricSeries.at(-1)?.cpu ?? 0).toFixed(1)}%</strong></div>
+                        <div><span>RAM</span><strong>{(vmMetricSeries.at(-1)?.ram ?? 0).toFixed(1)}%</strong></div>
+                        <div><span>Disk IO</span><strong>{(vmMetricSeries.at(-1)?.disk_iops ?? 0)} IOPS</strong></div>
+                        <div><span>Network</span><strong>{((vmMetricSeries.at(-1)?.net_rx_mbps ?? 0) + (vmMetricSeries.at(-1)?.net_tx_mbps ?? 0)).toFixed(2)} Mbps</strong></div>
                         <div><span>Status</span><strong className={`badge ${vm.status}`}>{vm.status}</strong></div>
                         <div><span>Uptime</span><strong>{vm.uptime}</strong></div>
                       </div>
@@ -815,19 +868,44 @@ export function VmDetailPage() {
 
                 {tab === 'monitoring' && (
                   <div className="grid-2">
-                    {['cpu', 'ram', 'diskIo', 'net'].map((k) => (
-                      <Card key={k} title={k.toUpperCase()}>
-                        <ResponsiveContainer width="100%" height={180}>
-                          <AreaChart data={metricsQuery.data || []}>
-                            <CartesianGrid strokeDasharray="3 3" />
-                            <XAxis dataKey="time" />
-                            <YAxis />
-                            <Tooltip />
-                            <Area type="monotone" dataKey={k} stroke="#2563eb" fill="#93c5fd" fillOpacity={0.4} />
-                          </AreaChart>
-                        </ResponsiveContainer>
-                      </Card>
-                    ))}
+                    <Card title="CPU / RAM">
+                      <ResponsiveContainer width="100%" height={180}>
+                        <AreaChart data={vmMetricSeries}>
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="created_at" tickFormatter={(time) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} />
+                          <YAxis tickFormatter={(val) => `${val}%`} />
+                          <Tooltip formatter={(value: number) => `${Number(value).toFixed(1)}%`} labelFormatter={(label) => new Date(label).toLocaleString()} />
+                          <Legend verticalAlign="top" height={36} />
+                          <Area type="monotone" dataKey="cpu" name="CPU Yükü" stroke="#2563eb" fill="#93c5fd" fillOpacity={0.4} />
+                          <Area type="monotone" dataKey="ram" name="RAM Yükü" stroke="#16a34a" fill="#86efac" fillOpacity={0.35} />
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    </Card>
+                    <Card title="Disk IOPS">
+                      <ResponsiveContainer width="100%" height={180}>
+                        <AreaChart data={vmMetricSeries}>
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="created_at" tickFormatter={(time) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} />
+                          <YAxis tickFormatter={(val) => `${val} IOPS`} />
+                          <Tooltip formatter={(value: number) => `${Number(value).toFixed(0)} IOPS`} labelFormatter={(label) => new Date(label).toLocaleString()} />
+                          <Legend verticalAlign="top" height={36} />
+                          <Area type="monotone" dataKey="disk_iops" name="Disk IOPS" stroke="#f59e0b" fill="#fde68a" fillOpacity={0.35} />
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    </Card>
+                    <Card title="Network RX/TX">
+                      <ResponsiveContainer width="100%" height={180}>
+                        <AreaChart data={vmMetricSeries}>
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="created_at" tickFormatter={(time) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} />
+                          <YAxis tickFormatter={(val) => `${Number(val).toFixed(1)} Mbps`} />
+                          <Tooltip formatter={(value: number) => `${Number(value).toFixed(2)} Mbps`} labelFormatter={(label) => new Date(label).toLocaleString()} />
+                          <Legend verticalAlign="top" height={36} />
+                          <Area type="monotone" dataKey="net_rx_mbps" name="RX Mbps" stroke="#06b6d4" fill="#67e8f9" fillOpacity={0.35} />
+                          <Area type="monotone" dataKey="net_tx_mbps" name="TX Mbps" stroke="#0ea5e9" fill="#7dd3fc" fillOpacity={0.35} />
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    </Card>
                   </div>
                 )}
 
@@ -872,6 +950,33 @@ export function VmDetailPage() {
                     ]}
                   />
                 </Card>
+                <Modal open={cloneOpen} title="Clone VM" onClose={() => setCloneOpen(false)}>
+                  <div className="form-grid">
+                    <label>Target VM ID
+                      <input value={cloneTargetId} onChange={(e) => setCloneTargetId(e.target.value)} />
+                    </label>
+                    <label>Clone Type
+                      <select value={cloneType} onChange={(e) => setCloneType(e.target.value as 'full' | 'linked')}>
+                        <option value="full">Full Clone</option>
+                        <option value="linked">Linked Clone</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="row-gap">
+                    <Button onClick={async () => {
+                      if (!vm) return;
+                      const targetId = cloneTargetId.trim();
+                      if (!targetId) {
+                        pushToast({ kind: 'error', title: 'Clone failed', message: 'Target VM ID is required.' });
+                        return;
+                      }
+                      await backendVmApi.cloneVm(vm.id, targetId, cloneType);
+                      queryClient.invalidateQueries({ queryKey: ['vms'] });
+                      setCloneOpen(false);
+                      pushToast({ kind: 'success', title: 'Clone queued', message: `${vm.id} -> ${targetId} (${cloneType})` });
+                    }}>Start Clone</Button>
+                  </div>
+                </Modal>
               </>
             )}
           </>
@@ -930,6 +1035,13 @@ export function VmDetailPage() {
             <div className="form-grid">
               <label>Disk Size (GB)
                 <input type="number" min={8} value={createVmForm.diskGb} onChange={(e) => setCreateVmForm((s) => ({ ...s, diskGb: Number(e.target.value) || 8 }))} />
+              </label>
+              <label>Storage Pool
+                <select value={createVmForm.storagePool} onChange={(e) => setCreateVmForm((s) => ({ ...s, storagePool: e.target.value }))}>
+                  {(storagePools.length > 0 ? storagePools : [{ name: 'default', state: 'active' }]).map((pool) => (
+                    <option key={pool.name} value={pool.name}>{pool.name} ({pool.state})</option>
+                  ))}
+                </select>
               </label>
               <label>Disk Bus
                 <select value={createVmForm.diskBus} onChange={(e) => setCreateVmForm((s) => ({ ...s, diskBus: e.target.value as CreateVmForm['diskBus'] }))}>
@@ -1014,6 +1126,7 @@ export function VmDetailPage() {
               <div><span>OS</span><strong>{createVmForm.osFamily} / {createVmForm.osVersion}</strong></div>
               <div><span>Compute</span><strong>{createVmForm.cpuSockets} socket × {createVmForm.cpuCores} core, {createVmForm.memoryMb} MB RAM</strong></div>
               <div><span>Storage</span><strong>{createVmForm.diskGb} GB {createVmForm.diskBus.toUpperCase()}</strong></div>
+              <div><span>Storage Pool</span><strong>{createVmForm.storagePool || 'default'}</strong></div>
               <div><span>Network</span><strong>{createVmForm.networkMode.toUpperCase()} on {createVmForm.networkSource || 'default'} ({createVmForm.nicModel})</strong></div>
               <div><span>Boot ISO</span><strong>{createVmForm.isoPath || 'none'}</strong></div>
               <div><span>Cloud-Init</span><strong>{createVmForm.cloudInitUser} / {createVmForm.cloudInitNetwork.toUpperCase()}</strong></div>

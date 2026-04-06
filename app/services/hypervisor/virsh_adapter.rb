@@ -20,11 +20,31 @@ module Hypervisor
       output.split("\n").map(&:strip).reject(&:empty?)
     end
 
-    def create_domain(name:, vcpus:, memory_mb:, disk_gb:, iso_path: nil, network_mode: 'network', network_source: 'default', vlan_id: nil)
-      disk_dir = ENV.fetch('VM_DISK_DIR', '/var/lib/libvirt/images')
-      FileUtils.mkdir_p(disk_dir)
-      disk_path = File.join(disk_dir, "#{name}.qcow2")
-      run('qemu-img', 'create', '-f', 'qcow2', disk_path, "#{Integer(disk_gb)}G")
+    def list_networks
+      output = run('net-list', '--all')
+      output.split("\n").filter_map do |line|
+        line = line.strip
+        next nil if line.empty? || line.start_with?('Name', '-')
+
+        cols = line.split(/\s+/)
+        next nil if cols.empty?
+
+        {
+          name: cols[0].to_s,
+          state: cols[1].to_s,
+          autostart: cols[2].to_s,
+          persistent: cols[3].to_s
+        }
+      end
+    end
+
+    def create_domain(name:, vcpus:, memory_mb:, disk_gb:, iso_path: nil, network_mode: 'network', network_source: 'default', vlan_id: nil, storage_pool: nil)
+      pool = clean(storage_pool.to_s.empty? ? ENV.fetch('DEFAULT_STORAGE_POOL', 'default') : storage_pool.to_s)
+      raise CommandError, 'storage_pool is required' if pool.empty?
+      volume_name = "#{clean(name)}.qcow2"
+      run('vol-create-as', pool, volume_name, "#{Integer(disk_gb)}G", '--format', 'qcow2')
+      disk_path = run('vol-path', volume_name, '--pool', pool).to_s.strip
+      raise CommandError, "Unable to resolve volume path for #{volume_name} in pool #{pool}" if disk_path.empty?
 
       xml = domain_xml(
         name: name,
@@ -38,7 +58,41 @@ module Hypervisor
       )
 
       with_tempfile(xml) { |path| run('define', path) }
-      { name: name, disk_path: disk_path }
+      { name: name, disk_path: disk_path, storage_pool: pool }
+    end
+
+    def list_storage_pools
+      output = run('pool-list', '--details')
+      output.split("\n").filter_map do |line|
+        line = line.strip
+        next nil if line.empty? || line.start_with?('Name', '-')
+
+        cols = line.split(/\s{2,}|\t+/).map(&:strip).reject(&:empty?)
+        cols = line.split(/\s+/) if cols.length < 3
+        next nil if cols.empty?
+
+        {
+          name: cols[0].to_s,
+          state: cols[1].to_s,
+          autostart: cols[2].to_s,
+          persistent: cols[3].to_s,
+          capacity: cols[4].to_s,
+          allocation: cols[5].to_s,
+          available: cols[6].to_s
+        }
+      end
+    end
+
+    def create_storage_pool(name:, path:)
+      pool_name = clean(name)
+      pool_path = path.to_s.strip
+      raise CommandError, 'pool name is required' if pool_name.empty?
+      raise CommandError, 'pool path is required' if pool_path.empty?
+
+      run('pool-define-as', pool_name, 'dir', '-', '-', '-', '-', pool_path)
+      run('pool-start', pool_name)
+      run('pool-autostart', pool_name)
+      { name: pool_name, path: pool_path, state: 'active' }
     end
 
     def destroy_domain(domain_id)
@@ -82,6 +136,19 @@ module Hypervisor
       msg = e.message.to_s
       if msg.include?('domain is not running') || msg.include?('domain is not active')
         'already-stopped'
+      else
+        raise
+      end
+    end
+
+    def shutdown(domain_id)
+      run('shutdown', clean(domain_id), '--mode', 'agent')
+    rescue CommandError => e
+      msg = e.message.to_s
+      if msg.include?('domain is not running') || msg.include?('domain is not active')
+        'already-stopped'
+      elsif msg.include?('unknown --mode') || msg.include?('unsupported configuration: unknown shutdown mode') || msg.include?('guest agent')
+        run('shutdown', clean(domain_id))
       else
         raise
       end
@@ -167,6 +234,47 @@ module Hypervisor
         run('autostart', vm, '--disable')
       end
       { autostart: !!enabled }
+    end
+
+    def list_host_devices
+      names = run('nodedev-list').split("\n").map(&:strip).reject(&:empty?)
+      names.filter_map do |node_name|
+        begin
+          node_doc = load_node_device_xml(node_name)
+          capability = node_doc.at_xpath('/device/capability')
+          cap_type = capability&.[]('type').to_s
+          next nil unless %w[pci usb_device].include?(cap_type)
+
+          {
+            node_name: node_name,
+            type: cap_type,
+            summary: node_device_summary(node_doc, cap_type),
+            address: node_device_address(node_doc, cap_type)
+          }
+        rescue CommandError
+          nil
+        end
+      end
+    end
+
+    def attach_host_device(domain_id:, node_name:)
+      vm = clean(domain_id)
+      node = clean(node_name)
+      raise CommandError, 'node_name is required' if node.empty?
+
+      xml = hostdev_xml_for_node(node)
+      with_tempfile(xml) { |path| run('attach-device', vm, path, '--config') }
+      { vm_id: vm, node_name: node, attached: true }
+    end
+
+    def detach_host_device(domain_id:, node_name:)
+      vm = clean(domain_id)
+      node = clean(node_name)
+      raise CommandError, 'node_name is required' if node.empty?
+
+      xml = hostdev_xml_for_node(node)
+      with_tempfile(xml) { |path| run('detach-device', vm, path, '--config') }
+      { vm_id: vm, node_name: node, detached: true }
     end
 
     def vm_details(domain_id)
@@ -265,7 +373,31 @@ module Hypervisor
       output.empty? ? nil : output
     end
 
-    def clone_domain(source_id:, target_id:)
+    def guest_info(domain_id)
+      vm = clean(domain_id)
+      output = run('domifaddr', vm, '--source', 'agent')
+      addresses = output.split("\n").filter_map do |line|
+        cols = line.split(/\s+/)
+        next nil if cols.length < 4
+        next nil if cols[0] == 'Name' || cols[0].start_with?('-')
+
+        {
+          interface: cols[0],
+          protocol: cols[1],
+          address: cols[3]
+        }
+      end
+      { vm_id: vm, addresses: addresses }
+    rescue CommandError => e
+      msg = e.message.to_s
+      if msg.include?('guest agent is not responding') || msg.include?('No agent is available') || msg.include?('Requested operation is not valid')
+        { vm_id: vm, addresses: [], agent_available: false }
+      else
+        raise
+      end
+    end
+
+    def clone_domain(source_id:, target_id:, clone_type: 'full')
       source_vm = clean(source_id)
       target_vm = clean(target_id)
       raise CommandError, 'Target VM ID is required' if target_vm.empty?
@@ -279,7 +411,11 @@ module Hypervisor
       disk_dir = ENV.fetch('VM_DISK_DIR', '/var/lib/libvirt/images')
       FileUtils.mkdir_p(disk_dir)
       target_disk = File.join(disk_dir, "#{target_vm}.qcow2")
-      run('qemu-img', 'convert', '-O', 'qcow2', source_disk, target_disk)
+      if clone_type.to_s == 'linked'
+        run('qemu-img', 'create', '-f', 'qcow2', '-F', 'qcow2', '-b', source_disk, target_disk)
+      else
+        run('qemu-img', 'convert', '-O', 'qcow2', source_disk, target_disk)
+      end
 
       cloned_doc = doc.dup
       name_node = cloned_doc.at_xpath('/domain/name')
@@ -289,7 +425,7 @@ module Hypervisor
       replace_primary_disk_source_in_doc(cloned_doc, target_disk)
       redefine_xml(cloned_doc)
 
-      { source_id: source_vm, target_id: target_vm, disk_path: target_disk }
+      { source_id: source_vm, target_id: target_vm, disk_path: target_disk, clone_type: clone_type.to_s == 'linked' ? 'linked' : 'full' }
     rescue CommandError
       FileUtils.rm_f(target_disk) if defined?(target_disk) && target_disk
       raise
@@ -420,6 +556,9 @@ module Hypervisor
             </disk>
             #{install_cdrom}
             #{network_interface}
+            <channel type='unix'>
+              <target type='virtio' name='org.qemu.guest_agent.0'/>
+            </channel>
             <graphics type='vnc' autoport='yes' listen='0.0.0.0'/>
             <video>
               <model type='virtio' vram='16384' heads='1' primary='yes'/>
@@ -570,6 +709,70 @@ module Hypervisor
 
     def redefine_xml(doc)
       with_tempfile(doc.to_xml) { |path| run('define', path) }
+    end
+
+    def load_node_device_xml(node_name)
+      xml = run('nodedev-dumpxml', clean(node_name))
+      Nokogiri::XML(xml) { |cfg| cfg.strict.noblanks }
+    rescue Nokogiri::XML::SyntaxError => e
+      raise CommandError, "Invalid node device XML for #{node_name}: #{e.message}"
+    end
+
+    def node_device_summary(doc, cap_type)
+      vendor = doc.at_xpath('/device/capability/vendor')&.text.to_s
+      product = doc.at_xpath('/device/capability/product')&.text.to_s
+      fallback = cap_type == 'pci' ? 'PCI Device' : 'USB Device'
+      [vendor, product].map(&:strip).reject(&:empty?).join(' ').strip.then { |v| v.empty? ? fallback : v }
+    end
+
+    def node_device_address(doc, cap_type)
+      if cap_type == 'pci'
+        {
+          domain: doc.at_xpath('/device/capability/domain')&.text.to_s,
+          bus: doc.at_xpath('/device/capability/bus')&.text.to_s,
+          slot: doc.at_xpath('/device/capability/slot')&.text.to_s,
+          function: doc.at_xpath('/device/capability/function')&.text.to_s
+        }
+      else
+        {
+          bus: doc.at_xpath('/device/capability/bus')&.text.to_s,
+          device: doc.at_xpath('/device/capability/device')&.text.to_s
+        }
+      end
+    end
+
+    def hostdev_xml_for_node(node_name)
+      doc = load_node_device_xml(node_name)
+      capability = doc.at_xpath('/device/capability')
+      cap_type = capability&.[]('type').to_s
+      if cap_type == 'pci'
+        domain = capability.at_xpath('./domain')&.text.to_s
+        bus = capability.at_xpath('./bus')&.text.to_s
+        slot = capability.at_xpath('./slot')&.text.to_s
+        function = capability.at_xpath('./function')&.text.to_s
+        raise CommandError, "Unsupported PCI node device: #{node_name}" if [domain, bus, slot, function].any?(&:empty?)
+        <<~XML
+          <hostdev mode='subsystem' type='pci' managed='yes'>
+            <source>
+              <address domain='#{domain}' bus='#{bus}' slot='#{slot}' function='#{function}'/>
+            </source>
+          </hostdev>
+        XML
+      elsif cap_type == 'usb_device'
+        vendor = capability.at_xpath('./vendor')&.[]('id').to_s
+        product = capability.at_xpath('./product')&.[]('id').to_s
+        raise CommandError, "Unsupported USB node device: #{node_name}" if vendor.empty? || product.empty?
+        <<~XML
+          <hostdev mode='subsystem' type='usb' managed='yes'>
+            <source>
+              <vendor id='#{vendor}'/>
+              <product id='#{product}'/>
+            </source>
+          </hostdev>
+        XML
+      else
+        raise CommandError, "Unsupported node device capability: #{cap_type}"
+      end
     end
 
     def convert_memory_to_kib(value, unit)

@@ -84,6 +84,34 @@ export interface VmOperationItem {
   finished_at?: string;
 }
 
+export interface HostMetricPoint {
+  created_at: string;
+  cpu_usage_pct: number;
+  ram_usage_pct: number;
+  load_avg_1m: number;
+  net_rx_bytes_sec: number;
+  net_tx_bytes_sec: number;
+}
+
+export interface VmMetricPoint {
+  created_at: string;
+  cpu_usage_pct: number;
+  ram_usage_pct: number;
+  disk_iops: number;
+  net_rx_bytes_sec: number;
+  net_tx_bytes_sec: number;
+}
+
+export interface StoragePoolItem {
+  name: string;
+  state: string;
+  autostart: string;
+  persistent?: string;
+  capacity?: string;
+  allocation?: string;
+  available?: string;
+}
+
 const metricHistory: Record<string, MetricsSample[]> = {};
 
 function getAuth() {
@@ -229,6 +257,14 @@ export const backendVmApi = {
     return apiRequest<SystemUsage>('/api/v1/system/usage');
   },
 
+  async getSystemMetricsHistory() {
+    return apiRequest<HostMetricPoint[]>('/api/v1/system/metrics-history');
+  },
+
+  async getStoragePools() {
+    return apiRequest<StoragePoolItem[]>('/api/v1/system/storage-pools');
+  },
+
   async getVms() {
     const [ids, details, jobs, backups] = await Promise.all([
       apiRequest<string[]>('/api/v1/vms'),
@@ -276,6 +312,10 @@ export const backendVmApi = {
 
   async getVmUsage(vmId: string) {
     return apiRequest<VmUsageSample>(`/api/v1/vms/${encodeURIComponent(vmId)}/usage`);
+  },
+
+  async getVmMetricsHistory(vmId: string) {
+    return apiRequest<VmMetricPoint[]>(`/api/v1/vms/${encodeURIComponent(vmId)}/metrics-history`);
   },
 
   async getIsoLibrary() {
@@ -342,6 +382,7 @@ export const backendVmApi = {
     startAtBoot: boolean;
     firewallEnabled: boolean;
     snapshotOnCreate: boolean;
+    storagePool?: string;
   }) {
     await apiRequest('/api/v1/vms', {
       method: 'POST',
@@ -355,6 +396,7 @@ export const backendVmApi = {
         cpu_cores: Math.max(1, input.cpuCores),
         memory_mb: Math.max(512, input.memoryMb),
         disk_gb: Math.max(8, input.diskGb),
+        storage_pool: (input.storagePool || 'default').trim() || 'default',
         disk_bus: input.diskBus,
         nic_model: input.nicModel,
         network_mode: input.networkMode === 'bridge' ? 'bridge' : 'network',
@@ -491,12 +533,17 @@ export const backendVmApi = {
     return { ok: true };
   },
 
-  async cloneVm(sourceVmId: string, targetVmId: string) {
+  async cloneVm(sourceVmId: string, targetVmId: string, cloneType: 'full' | 'linked' = 'full') {
     await apiRequest(`/api/v1/vms/${encodeURIComponent(sourceVmId)}/clone`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ target_id: targetVmId })
+      body: JSON.stringify({ target_id: targetVmId, clone_type: cloneType })
     });
+    return { ok: true };
+  },
+
+  async markVmAsTemplate(vmId: string) {
+    await apiRequest(`/api/v1/vms/${encodeURIComponent(vmId)}/template`, { method: 'POST' });
     return { ok: true };
   },
 

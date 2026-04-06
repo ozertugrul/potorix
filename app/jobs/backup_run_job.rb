@@ -38,6 +38,8 @@ class BackupRunJob
       updated_at: Time.now.utc
     )
 
+    apply_retention!(run[:policy_id], tenant_id, vm_id, backup_dir)
+
     AuditLogger.log!(
       tenant_id: tenant_id,
       actor_role: actor_role,
@@ -66,5 +68,32 @@ class BackupRunJob
       metadata: { run_id: run_id }
     )
     raise
+  end
+
+  private
+
+  def apply_retention!(policy_id, tenant_id, vm_id, backup_dir)
+    retention = if policy_id
+                  DB[:backup_policies].where(id: policy_id, tenant_id: tenant_id).get(:retention_count).to_i
+                else
+                  Integer(ENV.fetch('BACKUP_RETENTION_COUNT', 7))
+                end
+    retention = 1 if retention <= 0
+
+    stale = DB[:backup_runs]
+            .where(tenant_id: tenant_id, vm_id: vm_id, status: 'success')
+            .exclude(backup_path: nil)
+            .order(Sequel.desc(:created_at))
+            .offset(retention)
+            .all
+
+    stale.each do |row|
+      path = row[:backup_path].to_s
+      next if path.empty?
+      next unless path.start_with?(backup_dir.to_s)
+
+      FileUtils.rm_f(path)
+      DB[:backup_runs].where(id: row[:id]).update(message: 'pruned by retention', updated_at: Time.now.utc)
+    end
   end
 end

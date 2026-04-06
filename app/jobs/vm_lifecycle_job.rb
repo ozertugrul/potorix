@@ -20,18 +20,19 @@ class VmLifecycleJob
         iso_path: payload['iso_path'],
         network_mode: payload.fetch('network_mode', 'network'),
         network_source: payload.fetch('network_source', payload.fetch('network', 'default')),
-        vlan_id: payload['vlan_id']
+        vlan_id: payload['vlan_id'],
+        storage_pool: payload['storage_pool']
       )
       adapter.set_autostart(vm_id, payload['start_at_boot']) if payload.key?('start_at_boot')
       if payload['snapshot_on_create'] && payload['snapshot_on_create_name'].to_s != ''
         adapter.snapshot_create(vm_id, payload['snapshot_on_create_name'].to_s)
       end
       DB[:tenant_vms].insert_conflict(target: %i[tenant_id vm_id], update: { vm_id: Sequel[:excluded][:vm_id] })
-                    .insert(tenant_id: tenant, vm_id: vm_id, created_at: Time.now.utc)
+                    .insert(tenant_id: tenant, vm_id: vm_id, is_template: false, created_at: Time.now.utc)
     when 'start'
       adapter.start(vm_id)
     when 'stop'
-      adapter.stop(vm_id)
+      adapter.shutdown(vm_id)
     when 'destroy'
       adapter.destroy_domain(vm_id)
       DB[:tenant_vms].where(tenant_id: tenant, vm_id: vm_id).delete
@@ -52,9 +53,9 @@ class VmLifecycleJob
       adapter.detach_iso(vm_id)
     when 'clone'
       source_vm_id = sanitize_id(payload.fetch('source_vm_id', vm_id))
-      adapter.clone_domain(source_id: source_vm_id, target_id: vm_id)
+      adapter.clone_domain(source_id: source_vm_id, target_id: vm_id, clone_type: payload.fetch('clone_type', 'full'))
       DB[:tenant_vms].insert_conflict(target: %i[tenant_id vm_id], update: { vm_id: Sequel[:excluded][:vm_id] })
-                    .insert(tenant_id: tenant, vm_id: vm_id, created_at: Time.now.utc)
+                    .insert(tenant_id: tenant, vm_id: vm_id, is_template: false, created_at: Time.now.utc)
       source_profile = DB[:vm_profiles].where(tenant_id: tenant, vm_id: source_vm_id).first
       if source_profile
         now = Time.now.utc

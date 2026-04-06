@@ -55,8 +55,14 @@ ensure_table(:tenant_vms) do
   primary_key :id
   String :tenant_id, null: false
   String :vm_id, null: false
+  TrueClass :is_template, null: false, default: false
   DateTime :created_at, null: false
   index %i[tenant_id vm_id], unique: true
+end
+begin
+  DB.add_column(:tenant_vms, :is_template, TrueClass, null: false, default: false)
+rescue Sequel::DatabaseError
+  # already exists
 end
 
 ensure_table(:vm_profiles) do
@@ -212,3 +218,31 @@ begin
 rescue Sequel::DatabaseError
   # already exists
 end
+
+ensure_table(:host_metrics) do
+  primary_key :id
+  Float :cpu_usage_pct, null: false, default: 0.0
+  Float :ram_usage_pct, null: false, default: 0.0
+  Float :load_avg_1m, null: false, default: 0.0
+  Integer :net_rx_bytes_sec, null: false, default: 0
+  Integer :net_tx_bytes_sec, null: false, default: 0
+  DateTime :created_at, null: false
+  index :created_at
+end
+ensure_index(:host_metrics, %i[id created_at], name: :host_metrics_id_created_at_idx)
+
+ensure_table(:vm_metrics) do
+  primary_key :id
+  String :vm_id, null: false
+  String :tenant_id, null: false
+  Float :cpu_usage_pct, null: false, default: 0.0
+  Float :ram_usage_pct, null: false, default: 0.0
+  Integer :disk_iops, null: false, default: 0
+  Integer :net_rx_bytes_sec, null: false, default: 0
+  Integer :net_tx_bytes_sec, null: false, default: 0
+  DateTime :created_at, null: false
+  index :vm_id
+  index :tenant_id
+  index :created_at
+end
+ensure_index(:vm_metrics, %i[tenant_id vm_id created_at], name: :vm_metrics_tenant_vm_created_at_idx)

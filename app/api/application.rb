@@ -18,6 +18,7 @@ require_relative '../services/idempotency_store'
 require_relative '../jobs/vm_lifecycle_job'
 require_relative '../jobs/app_marketplace_job'
 require_relative '../jobs/backup_run_job'
+require_relative '../jobs/metrics_collector_job'
 
 class Application < Sinatra::Base
   VM_USAGE_CACHE = {}
@@ -249,6 +250,86 @@ class Application < Sinatra::Base
         alloc_disk_gb: alloc_disk_gb
       }
     })
+  end
+
+  get '/api/v1/system/storage-pools' do
+    authorize!('vm:read')
+    rows = Hypervisor::VirshAdapter.new.list_storage_pools
+    Oj.dump(data: rows)
+  rescue Hypervisor::VirshAdapter::CommandError => e
+    halt 422, Oj.dump(error: e.message)
+  end
+
+  get '/api/v1/system/hardware' do
+    authorize!('vm:read')
+    rows = Hypervisor::VirshAdapter.new.list_host_devices
+    Oj.dump(data: rows)
+  rescue Hypervisor::VirshAdapter::CommandError => e
+    halt 422, Oj.dump(error: e.message)
+  end
+
+  get '/api/v1/system/networks' do
+    authorize!('vm:read')
+    rows = Hypervisor::VirshAdapter.new.list_networks
+    Oj.dump(data: rows)
+  rescue Hypervisor::VirshAdapter::CommandError => e
+    halt 422, Oj.dump(error: e.message)
+  end
+
+  get '/api/v1/system/metrics-history' do
+    authorize!('vm:read')
+    rows = DB[:host_metrics]
+      .order(Sequel.desc(:created_at))
+      .limit(60)
+      .all
+      .reverse
+      .map do |row|
+      {
+        created_at: row[:created_at],
+        cpu_usage_pct: row[:cpu_usage_pct].to_f.round(2),
+        ram_usage_pct: row[:ram_usage_pct].to_f.round(2),
+        load_avg_1m: row[:load_avg_1m].to_f.round(3),
+        net_rx_bytes_sec: row[:net_rx_bytes_sec].to_i,
+        net_tx_bytes_sec: row[:net_tx_bytes_sec].to_i
+      }
+    end
+    Oj.dump(data: rows)
+  end
+
+  get '/api/v1/vms/:id/metrics-history' do
+    authorize!('vm:read')
+    vm_id = sanitize_id(params[:id])
+    assert_tenant_vm!(vm_id)
+    rows = DB[:vm_metrics]
+      .where(tenant_id: @tenant_id, vm_id: vm_id)
+      .order(Sequel.desc(:created_at))
+      .limit(60)
+      .all
+      .reverse
+      .map do |row|
+      {
+        created_at: row[:created_at],
+        cpu_usage_pct: row[:cpu_usage_pct].to_f.round(2),
+        ram_usage_pct: row[:ram_usage_pct].to_f.round(2),
+        disk_iops: row[:disk_iops].to_i,
+        net_rx_bytes_sec: row[:net_rx_bytes_sec].to_i,
+        net_tx_bytes_sec: row[:net_tx_bytes_sec].to_i
+      }
+    end
+    Oj.dump(data: rows)
+  end
+
+  post '/api/v1/vms/:id/hardware/attach' do
+    authorize!('vm:operate')
+    vm_id = sanitize_id(params[:id])
+    assert_tenant_vm!(vm_id)
+    body = json_body
+    node_name = sanitize_id(body.fetch('node_name'))
+    halt 400, Oj.dump(error: 'node_name is required') if node_name.empty?
+    data = Hypervisor::VirshAdapter.new.attach_host_device(domain_id: vm_id, node_name: node_name)
+    Oj.dump(data: data)
+  rescue Hypervisor::VirshAdapter::CommandError => e
+    halt 422, Oj.dump(error: e.message)
   end
 
   # Agent protocol module
@@ -484,6 +565,7 @@ class Application < Sinatra::Base
       'vcpus' => Integer(body.fetch('vcpus')),
       'memory_mb' => Integer(body.fetch('memory_mb')),
       'disk_gb' => Integer(body.fetch('disk_gb')),
+      'storage_pool' => sanitize_id(body.fetch('storage_pool', ENV.fetch('DEFAULT_STORAGE_POOL', 'default'))),
       'iso_path' => body['iso_path'],
       'network_mode' => network_mode,
       'network_source' => network_source,
@@ -633,6 +715,16 @@ class Application < Sinatra::Base
     Oj.dump(status: 'queued', action: 'stop', vm_id: vm_id, operation_id: operation_id, job_id: jid)
   end
 
+  get '/api/v1/vms/:id/guest-info' do
+    authorize!('vm:read')
+    vm_id = sanitize_id(params[:id])
+    assert_tenant_vm!(vm_id)
+    data = Hypervisor::VirshAdapter.new.guest_info(vm_id)
+    Oj.dump(data: data)
+  rescue Hypervisor::VirshAdapter::CommandError => e
+    halt 422, Oj.dump(error: e.message)
+  end
+
   get '/api/v1/vms/:id/snapshots' do
     authorize!('snapshot:manage')
     vm_id = sanitize_id(params[:id])
@@ -678,13 +770,24 @@ class Application < Sinatra::Base
     assert_tenant_vm!(source_vm_id)
     body = json_body
     target_vm_id = sanitize_id(body.fetch('target_id'))
+    clone_type = body.fetch('clone_type', 'full').to_s
+    halt 400, Oj.dump(error: 'clone_type must be full or linked') unless %w[full linked].include?(clone_type)
     halt 400, Oj.dump(error: 'target_id is required') if target_vm_id.empty?
     if DB[:tenant_vms].where(tenant_id: @tenant_id, vm_id: target_vm_id).count.positive?
       halt 409, Oj.dump(error: "VM ID #{target_vm_id} already exists")
     end
-    operation_id, jid = enqueue_operation('clone', target_vm_id, { 'source_vm_id' => source_vm_id })
+    operation_id, jid = enqueue_operation('clone', target_vm_id, { 'source_vm_id' => source_vm_id, 'clone_type' => clone_type })
     status 202
-    Oj.dump(status: 'queued', action: 'clone', source_vm_id: source_vm_id, vm_id: target_vm_id, operation_id: operation_id, job_id: jid)
+    Oj.dump(status: 'queued', action: 'clone', source_vm_id: source_vm_id, vm_id: target_vm_id, clone_type: clone_type, operation_id: operation_id, job_id: jid)
+  end
+
+  post '/api/v1/vms/:id/template' do
+    authorize!('vm:write')
+    vm_id = sanitize_id(params[:id])
+    assert_tenant_vm!(vm_id)
+    updated = DB[:tenant_vms].where(tenant_id: @tenant_id, vm_id: vm_id).update(is_template: true)
+    halt 404, Oj.dump(error: 'VM not found in tenant scope') if updated.zero?
+    Oj.dump(data: { vm_id: vm_id, is_template: true })
   end
 
   post '/api/v1/vms/:id/migrate' do
