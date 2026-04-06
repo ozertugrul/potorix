@@ -19,9 +19,12 @@ Potorix is a Proxmox-inspired virtualization panel for managing tenant-scoped VM
 ## Features
 
 - Tenant-scoped VM management (`create`, `start`, `stop/poweroff`, `destroy`, `purge`)
-- Snapshot operations (`create`, `revert`)
+- Snapshot operations (`create`, `revert`, `delete`)
+- VM mobility operations (`clone`, `migrate`)
 - ISO workflow (`library`, `attach`, `detach`, `boot order`)
+- Backup workflow (`run`, `restore`) with qcow2 export/checksum metadata
 - Offline VM tuning (vCPU, memory, disk resize + extra host disk attach)
+- VLAN-aware network XML generation for VM interfaces
 - Real-time event stream for jobs and audit logs (`/ws`)
 - Embedded browser console for running VMs (`/api/v1/vms/:id/console-ticket` + `novnc.html`)
 - Queue-driven orchestration with Sidekiq workers
@@ -38,6 +41,7 @@ Potorix is a Proxmox-inspired virtualization panel for managing tenant-scoped VM
 ## Security Notes
 
 - API access requires `X-API-Key` and `X-Tenant-ID`.
+- Supports both static env tokens (`AUTH_TOKENS`) and DB-managed API tokens (`/api/v1/auth/tokens`).
 - Keep production keys in `.env` only (never commit `.env`).
 - In development, the UI can pre-fill sample tenant/token values and stores current auth inputs in browser `localStorage`.
 - For production, use strong keys and override development defaults.
@@ -124,6 +128,9 @@ Core endpoints:
 - `POST /api/v1/vms/:id/stop`
 - `DELETE /api/v1/vms/:id`
 - `POST /api/v1/vms/:id/purge`
+- `POST /api/v1/vms/:id/clone`
+- `POST /api/v1/vms/:id/migrate`
+- `DELETE /api/v1/vms/:id/snapshots/:snapshot_name`
 - `POST /api/v1/vms/:id/attach-iso`
 - `POST /api/v1/vms/:id/detach-iso`
 - `POST /api/v1/vms/:id/boot-order`
@@ -138,6 +145,12 @@ Core endpoints:
 - `POST /api/v1/iso-library/upload`
 - `GET /api/v1/jobs`
 - `GET /api/v1/audit-logs`
+- `POST /api/v1/backups/run`
+- `POST /api/v1/backups/restore`
+- `GET /api/v1/backups/runs`
+- `POST /api/v1/auth/tokens`
+- `GET /api/v1/auth/tokens`
+- `DELETE /api/v1/auth/tokens/:id`
 
 Realtime:
 

@@ -5,6 +5,7 @@ require 'shellwords'
 require 'tempfile'
 require 'fileutils'
 require 'cgi'
+require 'nokogiri'
 
 module Hypervisor
   class VirshAdapter
@@ -19,7 +20,7 @@ module Hypervisor
       output.split("\n").map(&:strip).reject(&:empty?)
     end
 
-    def create_domain(name:, vcpus:, memory_mb:, disk_gb:, iso_path: nil, network_mode: 'network', network_source: 'default')
+    def create_domain(name:, vcpus:, memory_mb:, disk_gb:, iso_path: nil, network_mode: 'network', network_source: 'default', vlan_id: nil)
       disk_dir = ENV.fetch('VM_DISK_DIR', '/var/lib/libvirt/images')
       FileUtils.mkdir_p(disk_dir)
       disk_path = File.join(disk_dir, "#{name}.qcow2")
@@ -32,7 +33,8 @@ module Hypervisor
         disk_path: disk_path,
         iso_path: iso_path,
         network_mode: network_mode,
-        network_source: network_source
+        network_source: network_source,
+        vlan_id: vlan_id
       )
 
       with_tempfile(xml) { |path| run('define', path) }
@@ -111,6 +113,10 @@ module Hypervisor
       run('snapshot-revert', clean(domain_id), clean(snapshot_name))
     end
 
+    def snapshot_delete(domain_id, snapshot_name)
+      run('snapshot-delete', clean(domain_id), clean(snapshot_name), '--metadata')
+    end
+
     def attach_iso(domain_id, iso_path)
       run('change-media', clean(domain_id), 'sdb', '--insert', iso_path.to_s, '--config')
       set_boot_order(clean(domain_id), 'cdrom')
@@ -142,19 +148,14 @@ module Hypervisor
       vm = clean(domain_id)
       primary_dev = primary.to_s == 'cdrom' ? 'cdrom' : 'hd'
       secondary = primary_dev == 'cdrom' ? 'hd' : 'cdrom'
-      xml = run('dumpxml', vm)
-      boots = ["<boot dev='#{primary_dev}'/>", "<boot dev='#{secondary}'/>"].join("\n    ")
+      doc = load_domain_xml(vm)
+      os = doc.at_xpath('/domain/os')
+      raise CommandError, 'Invalid domain XML: missing <os>' unless os
 
-      updated = if xml.match?(%r{<os>.*?</os>}m)
-                  xml.sub(%r{<os>(.*?)</os>}m) do
-                    os_block = Regexp.last_match(1)
-                    cleaned = os_block.gsub(%r{\s*<boot dev='[^']+'/>\s*}m, "\n    ")
-                    "<os>#{cleaned.rstrip}\n    #{boots}\n  </os>"
-                  end
-                else
-                  xml
-                end
-      with_tempfile(updated) { |path| run('define', path) }
+      os.xpath('boot').remove
+      os.add_child(doc.create_element('boot', 'dev' => primary_dev))
+      os.add_child(doc.create_element('boot', 'dev' => secondary))
+      redefine_xml(doc)
       { primary: primary_dev }
     end
 
@@ -170,20 +171,30 @@ module Hypervisor
 
     def vm_details(domain_id)
       vm = clean(domain_id)
-      xml = run('dumpxml', vm)
+      doc = load_domain_xml(vm)
       state = run('domstate', vm).to_s.strip
-      boot_order = xml.scan(/<boot dev='([^']+)'\/>/).flatten
-      iso_path = xml[/<disk[^>]*device='cdrom'[^>]*>.*?<source file='([^']+)'\/>/m, 1]
-      network_mode = xml[/<interface type='(network|bridge)'>/, 1]
+      boot_order = doc.xpath('/domain/os/boot').map { |n| n['dev'].to_s }.reject(&:empty?)
+      iso_path = doc.at_xpath("/domain/devices/disk[@device='cdrom']/source")&.[]('file')
+      iface = doc.at_xpath('/domain/devices/interface[1]')
+      network_mode = iface&.[]('type')
+      source_node = iface&.at_xpath('./source')
       network_source = if network_mode == 'network'
-                         xml[/<interface type='network'>.*?<source network='([^']+)'/m, 1]
+                         source_node&.[]('network')
                        elsif network_mode == 'bridge'
-                         xml[/<interface type='bridge'>.*?<source bridge='([^']+)'/m, 1]
+                         source_node&.[]('bridge')
                        end
-      memory_kib = xml[/<memory unit='KiB'>(\d+)<\/memory>/, 1].to_i
+      memory_node = doc.at_xpath('/domain/memory')
+      memory_unit = memory_node&.[]('unit').to_s
+      memory_val = memory_node&.text.to_s.to_i
+      memory_kib = convert_memory_to_kib(memory_val, memory_unit)
       memory_mb = (memory_kib / 1024.0).round
-      vcpus = xml[/<vcpu(?:\s[^>]*)?>(\d+)<\/vcpu>/, 1].to_i
-      disks = xml.scan(%r{<disk[^>]*device='(disk|cdrom)'[^>]*>.*?<source file='([^']+)'\/>.*?<target dev='([^']+)'[^>]*/>.*?</disk>}m).map do |(device, source, target)|
+      vcpus = doc.at_xpath('/domain/vcpu')&.text.to_s.to_i
+      disks = doc.xpath('/domain/devices/disk').filter_map do |disk|
+        device = disk['device'].to_s
+        next nil unless %w[disk cdrom].include?(device)
+        source = disk.at_xpath('./source')&.[]('file')
+        target = disk.at_xpath('./target')&.[]('dev')
+        next nil if source.to_s.empty? || target.to_s.empty?
         { device: device, source: source, target: target }
       end
       {
@@ -203,21 +214,32 @@ module Hypervisor
     def reconfigure_offline(domain_id, vcpus: nil, memory_mb: nil, disk_gb: nil)
       vm = clean(domain_id)
       ensure_domain_stopped!(vm)
-      xml = run('dumpxml', vm)
-      updated = xml.dup
+      doc = load_domain_xml(vm)
+      changed = false
 
       if vcpus
-        updated.sub!(%r{<vcpu(?:\s[^>]*)?>\d+</vcpu>}, "<vcpu>#{Integer(vcpus)}</vcpu>")
+        vcpu_node = doc.at_xpath('/domain/vcpu')
+        raise CommandError, 'Invalid domain XML: missing <vcpu>' unless vcpu_node
+        vcpu_node.content = Integer(vcpus).to_s
+        changed = true
       end
       if memory_mb
         kib = Integer(memory_mb) * 1024
-        updated.sub!(%r{<memory unit='KiB'>\d+</memory>}, "<memory unit='KiB'>#{kib}</memory>")
-        updated.sub!(%r{<currentMemory unit='KiB'>\d+</currentMemory>}, "<currentMemory unit='KiB'>#{kib}</currentMemory>")
+        memory_node = doc.at_xpath('/domain/memory')
+        current_node = doc.at_xpath('/domain/currentMemory')
+        raise CommandError, 'Invalid domain XML: missing <memory>' unless memory_node
+        memory_node['unit'] = 'KiB'
+        memory_node.content = kib.to_s
+        if current_node
+          current_node['unit'] = 'KiB'
+          current_node.content = kib.to_s
+        end
+        changed = true
       end
-      with_tempfile(updated) { |path| run('define', path) } if updated != xml
+      redefine_xml(doc) if changed
 
       if disk_gb
-        disk_path = primary_disk_path_from_xml(xml)
+        disk_path = primary_disk_path_from_doc(doc)
         raise CommandError, 'Primary disk path not found (vda)' if disk_path.to_s.empty?
 
         run('qemu-img', 'resize', disk_path, "#{Integer(disk_gb)}G")
@@ -241,6 +263,71 @@ module Hypervisor
     def vnc_display(domain_id)
       output = run('vncdisplay', clean(domain_id)).to_s.strip
       output.empty? ? nil : output
+    end
+
+    def clone_domain(source_id:, target_id:)
+      source_vm = clean(source_id)
+      target_vm = clean(target_id)
+      raise CommandError, 'Target VM ID is required' if target_vm.empty?
+      ensure_domain_stopped!(source_vm)
+      raise CommandError, "Target VM already exists: #{target_vm}" if list_domains.include?(target_vm)
+
+      doc = load_domain_xml(source_vm)
+      source_disk = primary_disk_path_from_doc(doc)
+      raise CommandError, 'Source primary disk not found (vda)' if source_disk.to_s.empty?
+
+      disk_dir = ENV.fetch('VM_DISK_DIR', '/var/lib/libvirt/images')
+      FileUtils.mkdir_p(disk_dir)
+      target_disk = File.join(disk_dir, "#{target_vm}.qcow2")
+      run('qemu-img', 'convert', '-O', 'qcow2', source_disk, target_disk)
+
+      cloned_doc = doc.dup
+      name_node = cloned_doc.at_xpath('/domain/name')
+      name_node.content = target_vm if name_node
+      cloned_doc.at_xpath('/domain/uuid')&.remove
+      cloned_doc.xpath('/domain/devices/interface/mac').remove
+      replace_primary_disk_source_in_doc(cloned_doc, target_disk)
+      redefine_xml(cloned_doc)
+
+      { source_id: source_vm, target_id: target_vm, disk_path: target_disk }
+    rescue CommandError
+      FileUtils.rm_f(target_disk) if defined?(target_disk) && target_disk
+      raise
+    end
+
+    def migrate_domain(domain_id, destination_uri:, live: true, copy_storage: false)
+      vm = clean(domain_id)
+      dest = destination_uri.to_s.strip
+      raise CommandError, 'destination_uri is required' if dest.empty?
+
+      args = ['migrate']
+      args << '--live' if live
+      args << '--persistent'
+      args << '--copy-storage-all' if copy_storage
+      args << vm
+      args << dest
+      run(*args)
+      { vm_id: vm, destination_uri: dest, live: live, copy_storage: copy_storage }
+    end
+
+    def primary_disk_path(domain_id)
+      vm = clean(domain_id)
+      doc = load_domain_xml(vm)
+      path = primary_disk_path_from_doc(doc)
+      raise CommandError, 'Primary disk path not found (vda)' if path.to_s.empty?
+
+      path
+    end
+
+    def restore_primary_disk_from_backup(domain_id, backup_path)
+      vm = clean(domain_id)
+      src = backup_path.to_s
+      raise CommandError, 'backup_path is required' if src.strip.empty?
+      raise CommandError, "backup image not found: #{src}" unless File.file?(src)
+      ensure_domain_stopped!(vm)
+      target_disk = primary_disk_path(vm)
+      run('qemu-img', 'convert', '-O', 'qcow2', src, target_disk)
+      { vm_id: vm, restored_from: src, target_disk: target_disk }
     end
 
     private
@@ -270,7 +357,7 @@ module Hypervisor
       file&.close!
     end
 
-    def domain_xml(name:, vcpus:, memory_mb:, disk_path:, iso_path:, network_mode:, network_source:)
+    def domain_xml(name:, vcpus:, memory_mb:, disk_path:, iso_path:, network_mode:, network_source:, vlan_id: nil)
       install_cdrom = iso_path.to_s.empty? ? '' : <<~XML
         <disk type='file' device='cdrom'>
           <driver name='qemu' type='raw'/>
@@ -280,10 +367,17 @@ module Hypervisor
         </disk>
       XML
 
+      vlan_tag = if vlan_id.to_s.strip.empty?
+                   ''
+                 else
+                   "<vlan><tag id='#{Integer(vlan_id)}'/></vlan>"
+                 end
+
       network_interface = if network_mode.to_s == 'bridge'
                             <<~XML
                               <interface type='bridge'>
                                 <source bridge='#{clean(network_source)}'/>
+                                #{vlan_tag}
                                 <model type='virtio'/>
                               </interface>
                             XML
@@ -291,6 +385,7 @@ module Hypervisor
                             <<~XML
                               <interface type='network'>
                                 <source network='#{clean(network_source)}'/>
+                                #{vlan_tag}
                                 <model type='virtio'/>
                               </interface>
                             XML
@@ -440,18 +535,51 @@ module Hypervisor
       raise CommandError, 'VM must be powered off for this operation'
     end
 
-    def primary_disk_path_from_xml(xml)
-      xml[/<disk[^>]*device='disk'[^>]*>.*?<target dev='vda'[^>]*\/>.*?<source file='([^']+)'\/>.*?<\/disk>/m, 1] ||
-        xml[/<disk[^>]*device='disk'[^>]*>.*?<source file='([^']+)'\/>.*?<target dev='vda'[^>]*\/>.*?<\/disk>/m, 1]
+    def primary_disk_path_from_doc(doc)
+      disk = doc.at_xpath("/domain/devices/disk[@device='disk'][target[@dev='vda']]")
+      disk&.at_xpath('./source')&.[]('file')
     end
 
     def next_virtio_disk_target(xml)
-      used = xml.scan(/<target dev='(vd[a-z])'[^>]*\/>/).flatten
+      doc = Nokogiri::XML(xml) { |cfg| cfg.strict.noblanks }
+      used = doc.xpath('/domain/devices/disk/target').map { |t| t['dev'].to_s }.select { |d| d.match?(/^vd[a-z]$/) }
       ('b'..'z').each do |suffix|
         dev = "vd#{suffix}"
         return dev unless used.include?(dev)
       end
       raise CommandError, 'No free virtio disk target available'
+    end
+
+    def replace_primary_disk_source_in_doc(doc, new_source)
+      disk = doc.at_xpath("/domain/devices/disk[@device='disk'][target[@dev='vda']]")
+      raise CommandError, 'Primary disk not found for clone' unless disk
+      source = disk.at_xpath('./source')
+      unless source
+        source = doc.create_element('source')
+        disk.add_child(source)
+      end
+      source['file'] = new_source
+    end
+
+    def load_domain_xml(vm)
+      xml = run('dumpxml', vm)
+      Nokogiri::XML(xml) { |cfg| cfg.strict.noblanks }
+    rescue Nokogiri::XML::SyntaxError => e
+      raise CommandError, "Invalid domain XML for #{vm}: #{e.message}"
+    end
+
+    def redefine_xml(doc)
+      with_tempfile(doc.to_xml) { |path| run('define', path) }
+    end
+
+    def convert_memory_to_kib(value, unit)
+      case unit.to_s
+      when 'KiB', '' then value
+      when 'MiB' then value * 1024
+      when 'GiB' then value * 1024 * 1024
+      else
+        value
+      end
     end
   end
 end

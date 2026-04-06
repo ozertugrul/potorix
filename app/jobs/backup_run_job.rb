@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 require 'securerandom'
+require 'open3'
+require 'fileutils'
 
 class BackupRunJob
   include Sidekiq::Job
@@ -12,15 +14,25 @@ class BackupRunJob
 
     DB[:backup_runs].where(id: run_id).update(status: 'running', started_at: now, updated_at: now)
 
-    # Placeholder backup engine; in next phase replace with real snapshot/export/upload pipeline.
-    sleep 1
-    size_bytes = rand(50_000_000..200_000_000)
-    checksum = SecureRandom.hex(16)
+    vm_id = run[:vm_id].to_s
+    adapter = Hypervisor::VirshAdapter.new
+    source_disk = adapter.primary_disk_path(vm_id)
+    backup_dir = ENV.fetch('BACKUP_DIR', '/var/lib/libvirt/backups')
+    FileUtils.mkdir_p(backup_dir)
+    stamp = Time.now.utc.strftime('%Y%m%d%H%M%S')
+    backup_path = File.join(backup_dir, "#{vm_id}-#{stamp}.qcow2")
+    out, ok = Open3.capture2e('qemu-img', 'convert', '-O', 'qcow2', source_disk, backup_path)
+    raise "backup export failed: #{out}" unless ok.success?
+    size_bytes = File.size(backup_path)
+    checksum, sum_ok = Open3.capture2e('sha256sum', backup_path)
+    raise "checksum failed: #{checksum}" unless sum_ok.success?
+    checksum = checksum.to_s.split.first.to_s
 
     DB[:backup_runs].where(id: run_id).update(
       status: 'success',
       size_bytes: size_bytes,
       checksum: checksum,
+      backup_path: backup_path,
       message: 'backup completed',
       finished_at: Time.now.utc,
       updated_at: Time.now.utc
@@ -34,7 +46,7 @@ class BackupRunJob
       resource_id: run[:vm_id],
       status: 'success',
       message: "backup completed for #{run[:vm_id]}",
-      metadata: { run_id: run_id, size_bytes: size_bytes, checksum: checksum }
+      metadata: { run_id: run_id, size_bytes: size_bytes, checksum: checksum, backup_path: backup_path }
     )
   rescue StandardError => e
     DB[:backup_runs].where(id: run_id).update(

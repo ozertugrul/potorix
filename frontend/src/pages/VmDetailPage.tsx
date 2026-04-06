@@ -484,8 +484,23 @@ export function VmDetailPage() {
                 <Button icon={<RotateCcw size={15} />} loading={reboot.isPending || actionLoading.reboot} disabled={!canStop} onClick={() => reboot.mutate()}>Reboot</Button>
                 <Button icon={<PowerOff size={15} />} loading={shutdown.isPending || actionLoading.shutdown} disabled={!canStop} onClick={() => shutdown.mutate()}>Shutdown</Button>
                 <Button icon={<Terminal size={15} />} disabled={!vm} onClick={() => setTab('console')}>Console</Button>
-                <Button icon={<Copy size={15} />} disabled title="Clone endpoint not available yet">Clone</Button>
-                <Button icon={<ArrowUpDown size={15} />} disabled title="Migrate endpoint not available yet">Migrate</Button>
+                <Button icon={<Copy size={15} />} disabled={!vm} onClick={async () => {
+                  if (!vm) return;
+                  const defaultTarget = String(Number(vm.id) + 1);
+                  const targetId = window.prompt('Clone target VM ID', defaultTarget)?.trim() || '';
+                  if (!targetId) return;
+                  await backendVmApi.cloneVm(vm.id, targetId);
+                  queryClient.invalidateQueries({ queryKey: ['vms'] });
+                  pushToast({ kind: 'success', title: 'Clone queued', message: `${vm.id} -> ${targetId}` });
+                }}>Clone</Button>
+                <Button icon={<ArrowUpDown size={15} />} disabled={!vm} onClick={async () => {
+                  if (!vm) return;
+                  const destination = window.prompt('Destination libvirt URI', 'qemu+ssh://root@target/system')?.trim() || '';
+                  if (!destination) return;
+                  await backendVmApi.migrateVm(vm.id, destination, true, false);
+                  queryClient.invalidateQueries({ queryKey: ['vms'] });
+                  pushToast({ kind: 'success', title: 'Migrate queued', message: `${vm.id} -> ${destination}` });
+                }}>Migrate</Button>
                 <Button icon={<Camera size={15} />} loading={quickSnap.isPending || actionLoading.snapshot} disabled={!vm} onClick={() => quickSnap.mutate()}>Snapshot</Button>
                 <Button icon={<Trash2 size={15} />} variant="danger" loading={remove.isPending || actionLoading.delete} disabled={!vm} onClick={() => {
                   if (!vm || !window.confirm(`Delete ${vm.name} permanently?`)) return;
@@ -708,7 +723,11 @@ export function VmDetailPage() {
                     <Table rows={vm.snapshots} columns={[
                       { key: 'name', label: 'Name' },
                       { key: 'createdAt', label: 'Created' },
-                      { key: 'actions', label: 'Actions', render: (row) => <div className="row-gap"><Button onClick={async () => { await backendVmApi.rollbackSnapshot(vm.id, row.id); queryClient.invalidateQueries({ queryKey: ['vm', vm.id] }); pushToast({ kind: 'success', title: 'Rollback complete', message: `${row.name} restored.` }); }}>Rollback</Button><Button variant="danger" disabled title="Snapshot delete endpoint not available">Delete</Button></div> }
+                      {
+                        key: 'actions',
+                        label: 'Actions',
+                        render: (row) => <div className="row-gap"><Button onClick={async () => { await backendVmApi.rollbackSnapshot(vm.id, row.id); queryClient.invalidateQueries({ queryKey: ['vm', vm.id] }); pushToast({ kind: 'success', title: 'Rollback complete', message: `${row.name} restored.` }); }}>Rollback</Button><Button variant="danger" onClick={async () => { await backendVmApi.removeSnapshot(vm.id, row.id); queryClient.invalidateQueries({ queryKey: ['vm', vm.id] }); pushToast({ kind: 'success', title: 'Snapshot delete queued', message: `${row.name} remove requested.` }); }}>Delete</Button></div>
+                      }
                     ]} />
                   </Card>
                 )}
@@ -720,7 +739,15 @@ export function VmDetailPage() {
                       { key: 'name', label: 'Backup' },
                       { key: 'createdAt', label: 'Created' },
                       { key: 'size', label: 'Size' },
-                      { key: 'restore', label: 'Action', render: (row) => <Button disabled title="Restore endpoint not available yet">Restore</Button> }
+                      {
+                        key: 'restore',
+                        label: 'Action',
+                        render: (row) => <Button onClick={async () => {
+                          await backendVmApi.restoreBackup(vm.id, row.id);
+                          queryClient.invalidateQueries({ queryKey: ['vm', vm.id] });
+                          pushToast({ kind: 'success', title: 'Restore queued', message: `${row.name} restore requested.` });
+                        }}>Restore</Button>
+                      }
                     ]} />
                   </Card>
                 )}

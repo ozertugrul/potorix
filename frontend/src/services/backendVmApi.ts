@@ -443,7 +443,13 @@ export const backendVmApi = {
   },
 
   async deleteSnapshot() {
-    throw new Error('Snapshot delete endpoint is not available');
+    throw new Error('snapshot_id is required');
+  },
+
+  async removeSnapshot(vmId: string, snapshotId: string) {
+    if (!snapshotId?.trim()) throw new Error('snapshot_id is required');
+    await apiRequest(`/api/v1/vms/${encodeURIComponent(vmId)}/snapshots/${encodeURIComponent(snapshotId)}`, { method: 'DELETE' });
+    return { ok: true };
   },
 
   async rollbackSnapshot(vmId: string, snapshotId: string) {
@@ -474,8 +480,33 @@ export const backendVmApi = {
     return { ok: true };
   },
 
-  async restoreBackup() {
-    throw new Error('Restore endpoint is not available');
+  async restoreBackup(vmId: string, backupId: string) {
+    const numericRunId = Number(String(backupId).replace(/^backup-/, ''));
+    if (!Number.isFinite(numericRunId) || numericRunId <= 0) throw new Error('Invalid backup id');
+    await apiRequest('/api/v1/backups/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vm_id: vmId, backup_run_id: numericRunId })
+    });
+    return { ok: true };
+  },
+
+  async cloneVm(sourceVmId: string, targetVmId: string) {
+    await apiRequest(`/api/v1/vms/${encodeURIComponent(sourceVmId)}/clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target_id: targetVmId })
+    });
+    return { ok: true };
+  },
+
+  async migrateVm(vmId: string, destinationUri: string, live = true, copyStorage = false) {
+    await apiRequest(`/api/v1/vms/${encodeURIComponent(vmId)}/migrate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ destination_uri: destinationUri, live, copy_storage: copyStorage })
+    });
+    return { ok: true };
   },
 
   async updateVm(vmId: string, patch: Partial<VmEntity>) {

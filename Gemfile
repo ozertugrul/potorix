@@ -18,6 +18,7 @@ gem 'prometheus-client', '~> 4.2'
 gem 'ruby-libvirt', '~> 0.8.4'
 gem 'faye-websocket', '~> 0.11'
 gem 'connection_pool', '~> 2.5'
+gem 'nokogiri', '~> 1.16'
 
 group :development, :test do
   gem 'rspec', '~> 3.13'

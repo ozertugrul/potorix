@@ -6,6 +6,7 @@ require 'faye/websocket'
 require 'securerandom'
 require 'fileutils'
 require 'json'
+require 'digest'
 require_relative '../../config/boot'
 require_relative '../../config/database'
 require_relative '../services/auth/api_key_auth'
@@ -400,6 +401,21 @@ class Application < Sinatra::Base
     Oj.dump(response)
   end
 
+  post '/api/v1/backups/restore' do
+    authorize!('vm:operate')
+    body = json_body
+    vm_id = sanitize_id(body.fetch('vm_id'))
+    backup_run_id = Integer(body.fetch('backup_run_id'))
+    assert_tenant_vm!(vm_id)
+    run = DB[:backup_runs].where(id: backup_run_id, tenant_id: @tenant_id, vm_id: vm_id).first
+    halt 404, Oj.dump(error: 'Backup run not found') unless run
+    halt 409, Oj.dump(error: 'Backup is not in success state') unless run[:status].to_s == 'success'
+    halt 422, Oj.dump(error: 'Backup artifact path is missing') if run[:backup_path].to_s.strip.empty?
+    operation_id, jid = enqueue_operation('backup_restore', vm_id, { 'backup_run_id' => backup_run_id })
+    status 202
+    Oj.dump(status: 'queued', action: 'backup_restore', vm_id: vm_id, backup_run_id: backup_run_id, operation_id: operation_id, job_id: jid)
+  end
+
   get '/api/v1/backups/runs' do
     authorize!('vm:read')
     rows = DB[:backup_runs].where(tenant_id: @tenant_id).order(Sequel.desc(:id)).limit(limit_param).all
@@ -471,6 +487,7 @@ class Application < Sinatra::Base
       'iso_path' => body['iso_path'],
       'network_mode' => network_mode,
       'network_source' => network_source,
+      'vlan_id' => sanitize_vlan_id(body['vlan_id']),
       'start_at_boot' => !!body['start_at_boot'],
       'snapshot_on_create' => !!body['snapshot_on_create'],
       'snapshot_on_create_name' => sanitize_id(body.fetch('snapshot_on_create_name', 'initial-state'))
@@ -643,6 +660,48 @@ class Application < Sinatra::Base
     operation_id, jid = enqueue_operation('snapshot_revert', vm_id, { 'snapshot_name' => snapshot_name })
     status 202
     Oj.dump(status: 'queued', action: 'snapshot_revert', vm_id: vm_id, snapshot_name: snapshot_name, operation_id: operation_id, job_id: jid)
+  end
+
+  delete '/api/v1/vms/:id/snapshots/:snapshot_name' do
+    authorize!('snapshot:manage')
+    vm_id = sanitize_id(params[:id])
+    assert_tenant_vm!(vm_id)
+    snapshot_name = sanitize_id(params[:snapshot_name])
+    operation_id, jid = enqueue_operation('snapshot_delete', vm_id, { 'snapshot_name' => snapshot_name })
+    status 202
+    Oj.dump(status: 'queued', action: 'snapshot_delete', vm_id: vm_id, snapshot_name: snapshot_name, operation_id: operation_id, job_id: jid)
+  end
+
+  post '/api/v1/vms/:id/clone' do
+    authorize!('vm:write')
+    source_vm_id = sanitize_id(params[:id])
+    assert_tenant_vm!(source_vm_id)
+    body = json_body
+    target_vm_id = sanitize_id(body.fetch('target_id'))
+    halt 400, Oj.dump(error: 'target_id is required') if target_vm_id.empty?
+    if DB[:tenant_vms].where(tenant_id: @tenant_id, vm_id: target_vm_id).count.positive?
+      halt 409, Oj.dump(error: "VM ID #{target_vm_id} already exists")
+    end
+    operation_id, jid = enqueue_operation('clone', target_vm_id, { 'source_vm_id' => source_vm_id })
+    status 202
+    Oj.dump(status: 'queued', action: 'clone', source_vm_id: source_vm_id, vm_id: target_vm_id, operation_id: operation_id, job_id: jid)
+  end
+
+  post '/api/v1/vms/:id/migrate' do
+    authorize!('vm:operate')
+    vm_id = sanitize_id(params[:id])
+    assert_tenant_vm!(vm_id)
+    body = json_body
+    destination_uri = body.fetch('destination_uri').to_s.strip
+    halt 400, Oj.dump(error: 'destination_uri is required') if destination_uri.empty?
+    payload = {
+      'destination_uri' => destination_uri,
+      'live' => body.fetch('live', true) ? true : false,
+      'copy_storage' => body.fetch('copy_storage', false) ? true : false
+    }
+    operation_id, jid = enqueue_operation('migrate', vm_id, payload)
+    status 202
+    Oj.dump(status: 'queued', action: 'migrate', vm_id: vm_id, operation_id: operation_id, job_id: jid)
   end
 
   get '/api/v1/vms/:id/vnc' do
@@ -907,6 +966,61 @@ class Application < Sinatra::Base
     Oj.dump(data: rows)
   end
 
+  post '/api/v1/auth/tokens' do
+    authorize!('vm:write')
+    body = json_body
+    role = body.fetch('role').to_s.strip
+    halt 400, Oj.dump(error: 'role must be one of admin/operator/viewer') unless %w[admin operator viewer].include?(role)
+    ttl_days = Integer(body.fetch('ttl_days', 90))
+    halt 400, Oj.dump(error: 'ttl_days must be between 1 and 365') unless ttl_days.between?(1, 365)
+    now = Time.now.utc
+    raw = "ptx_#{SecureRandom.hex(24)}"
+    digest = Digest::SHA256.hexdigest(raw)
+    hint = "#{raw[0, 8]}...#{raw[-4, 4]}"
+    DB[:api_tokens].insert(
+      tenant_id: @tenant_id,
+      role: role,
+      token_hash: digest,
+      token_hint: hint,
+      status: 'active',
+      expires_at: now + (ttl_days * 24 * 60 * 60),
+      created_at: now,
+      updated_at: now
+    )
+    status 201
+    Oj.dump(data: { token: raw, role: role, token_hint: hint, expires_at: (now + (ttl_days * 24 * 60 * 60)).iso8601 })
+  end
+
+  get '/api/v1/auth/tokens' do
+    authorize!('vm:write')
+    rows = DB[:api_tokens]
+           .where(tenant_id: @tenant_id)
+           .order(Sequel.desc(:id))
+           .limit(limit_param)
+           .all
+           .map do |r|
+      {
+        id: r[:id],
+        role: r[:role],
+        token_hint: r[:token_hint],
+        status: r[:status],
+        expires_at: r[:expires_at],
+        last_used_at: r[:last_used_at],
+        created_at: r[:created_at]
+      }
+    end
+    Oj.dump(data: rows)
+  end
+
+  delete '/api/v1/auth/tokens/:id' do
+    authorize!('vm:write')
+    id = Integer(params[:id])
+    updated = DB[:api_tokens].where(id: id, tenant_id: @tenant_id).update(status: 'revoked', updated_at: Time.now.utc)
+    halt 404, Oj.dump(error: 'Token not found') if updated.zero?
+    status 204
+    ''
+  end
+
   private
 
   def json_body
@@ -926,6 +1040,15 @@ class Application < Sinatra::Base
 
   def sanitize_id(value)
     value.to_s.gsub(/[^a-zA-Z0-9_.:-]/, '')
+  end
+
+  def sanitize_vlan_id(value)
+    return nil if value.nil? || value.to_s.strip.empty?
+    vlan = Integer(value)
+    halt 400, Oj.dump(error: 'vlan_id must be between 1 and 4094') unless vlan.between?(1, 4094)
+    vlan
+  rescue ArgumentError, TypeError
+    halt 400, Oj.dump(error: 'vlan_id must be an integer')
   end
 
   def assert_tenant_vm!(vm_id)

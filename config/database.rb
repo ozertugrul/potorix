@@ -87,6 +87,22 @@ ensure_table(:vm_operations) do
 end
 ensure_index(:vm_operations, %i[tenant_id id], name: :vm_operations_tenant_id_id_idx)
 
+ensure_table(:api_tokens) do
+  primary_key :id
+  String :tenant_id, null: false
+  String :role, null: false
+  String :token_hash, null: false
+  String :token_hint, null: false
+  String :status, null: false, default: 'active'
+  DateTime :expires_at
+  DateTime :last_used_at
+  DateTime :created_at, null: false
+  DateTime :updated_at, null: false
+  index %i[tenant_id token_hash], unique: true
+  index %i[tenant_id role]
+  index :status
+end
+
 ensure_table(:audit_logs) do
   primary_key :id
   String :tenant_id, null: false
@@ -182,6 +198,7 @@ ensure_table(:backup_runs) do
   String :checksum
   Text :message
   Text :error_message
+  Text :backup_path
   DateTime :started_at
   DateTime :finished_at
   DateTime :created_at, null: false
@@ -190,3 +207,8 @@ ensure_table(:backup_runs) do
   index :status
 end
 ensure_index(:backup_runs, %i[tenant_id id], name: :backup_runs_tenant_id_id_idx)
+begin
+  DB.add_column(:backup_runs, :backup_path, String)
+rescue Sequel::DatabaseError
+  # already exists
+end
