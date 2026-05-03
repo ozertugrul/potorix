@@ -369,8 +369,31 @@ module Hypervisor
     end
 
     def vnc_display(domain_id)
-      output = run('vncdisplay', clean(domain_id)).to_s.strip
-      output.empty? ? nil : output
+      vm = clean(domain_id)
+      # First attempt: virsh vncdisplay (fast path, works when libvirt has committed the port).
+      output = run('vncdisplay', vm).to_s.strip
+      return output unless output.empty?
+
+      # Fallback: parse domain XML for <graphics type='vnc' port='...'> directly.
+      # This resolves the "display not active" error when the VM is running but
+      # libvirt hasn't yet registered the display in its vncdisplay cache.
+      xml_output = run('dumpxml', '--live', vm).to_s
+      port_match = xml_output.match(/<graphics[^>]+type=['"]vnc['"][^>]+port=['"](-?\d+)['"]/)
+      unless port_match
+        # Also try reversed attribute order
+        port_match = xml_output.match(/type=['"]vnc['"][^>]*port=['"](-?\d+)['"]/) ||
+                     xml_output.match(/port=['"](-?\d+)['"][^>]*type=['"]vnc['"]/)
+      end
+      return nil if port_match.nil?
+
+      port_num = Integer(port_match[1])
+      # libvirt uses -1 for autoport before assignment; treat as not-yet-ready.
+      return nil if port_num < 0
+
+      # Return in display offset format (:N) where N = port - 5900.
+      ":#{port_num - 5900}"
+    rescue CommandError
+      nil
     end
 
     def guest_info(domain_id)

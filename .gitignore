@@ -36,3 +36,8 @@ prompt.txt
 
 # Frontend
 /frontend/node_modules
+/public/assets
+/public/index.html
+
+# Temp
+test_parse.rb

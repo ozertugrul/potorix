@@ -1,6 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-const DEV_AUTH_DEFAULTS = Object.freeze({ tenant: 'tenant-a', token: 'dev-admin-key' });
+// Development-only auth defaults. These are pre-filled in dev mode for convenience.
+// In production (APP_ENV != development) the fallback is intentionally disabled.
+const IS_DEV = import.meta.env.DEV;
+const DEV_AUTH_DEFAULTS = Object.freeze({
+  tenant: import.meta.env.VITE_DEFAULT_TENANT || 'tenant-a',
+  token:  import.meta.env.VITE_DEFAULT_TOKEN  || 'dev-admin-key'
+});
 const AUTH_STORAGE_KEYS = Object.freeze({ tenant: 'potorix.auth.tenant', token: 'potorix.auth.token' });
 
 const NAV_ITEMS = [
@@ -117,10 +123,13 @@ function useApi(authRef, onAuthFallback) {
     };
 
     const firstTenant = authRef.current.tenant.trim() || DEV_AUTH_DEFAULTS.tenant;
-    const firstToken = authRef.current.token.trim() || DEV_AUTH_DEFAULTS.token;
+    const firstToken  = authRef.current.token.trim()  || DEV_AUTH_DEFAULTS.token;
     let { res, body } = await perform(firstTenant, firstToken);
 
-    const canFallback = firstTenant !== DEV_AUTH_DEFAULTS.tenant || firstToken !== DEV_AUTH_DEFAULTS.token;
+    // Auth fallback is only active in development to aid local dev workflow.
+    // In production the user must supply correct credentials explicitly.
+    const canFallback = IS_DEV &&
+      (firstTenant !== DEV_AUTH_DEFAULTS.tenant || firstToken !== DEV_AUTH_DEFAULTS.token);
     if ((res.status === 401 || res.status === 403) && canFallback) {
       onAuthFallback(DEV_AUTH_DEFAULTS.tenant, DEV_AUTH_DEFAULTS.token);
       ({ res, body } = await perform(DEV_AUTH_DEFAULTS.tenant, DEV_AUTH_DEFAULTS.token));
@@ -138,6 +147,7 @@ export function App() {
   const [selectedVm, setSelectedVm] = useState('');
   const [busy, setBusy] = useState(false);
   const [consoleVmId, setConsoleVmId] = useState('');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const [snapshotName, setSnapshotName] = useState('pre-change');
   const [snapshotVmId, setSnapshotVmId] = useState('');
@@ -249,6 +259,9 @@ export function App() {
     }
   }, [api, pushToast, selectedVm, snapshotVmId]);
 
+  // Reset delete confirmation when the selected VM changes.
+  useEffect(() => { setConfirmDelete(false); }, [selectedVm]);
+
   const runAction = useCallback(async (title, callback) => {
     if (busy) return;
     setBusy(true);
@@ -262,6 +275,17 @@ export function App() {
       setBusy(false);
     }
   }, [busy, refresh, pushToast]);
+
+  // Debounced refresh: coalesces rapid WS events (e.g. a burst of job.* events)
+  // into a single API round-trip instead of firing one call per event.
+  const refreshDebounceRef = useRef(null);
+  const debouncedRefresh = useCallback(() => {
+    if (refreshDebounceRef.current) clearTimeout(refreshDebounceRef.current);
+    refreshDebounceRef.current = window.setTimeout(() => {
+      refreshDebounceRef.current = null;
+      refresh();
+    }, 500);
+  }, [refresh]);
 
   const connectRealtime = useCallback(() => {
     if (socketRef.current) socketRef.current.close();
@@ -280,7 +304,8 @@ export function App() {
       if (ev !== 'ws.connected' && !(ev === 'audit.logged' && String(event.data?.status || '').toLowerCase() === 'queued')) {
         pushToast(event.severity === 'error' ? 'error' : 'info', event.event_type, message);
       }
-      if (ev.startsWith('job.') || ev.startsWith('audit.')) window.setTimeout(() => refresh(), 220);
+      // Debounce: multiple rapid events collapse into one refresh call.
+      if (ev.startsWith('job.') || ev.startsWith('audit.')) debouncedRefresh();
     };
 
     ws.onclose = () => {
@@ -288,7 +313,7 @@ export function App() {
     };
 
     socketRef.current = ws;
-  }, [pushToast, refresh]);
+  }, [pushToast, debouncedRefresh]);
 
   useEffect(() => {
     refresh();
@@ -315,12 +340,17 @@ export function App() {
     await api(`/api/v1/vms/${encodeURIComponent(selectedVm)}/stop`, { method: 'POST' });
   });
 
-  const deleteVm = () => runAction('Delete VM', async () => {
-    if (!selectedVm) throw new Error('Select a VM first');
-    if (!window.confirm(`Delete VM ${selectedVm}? This removes disks too.`)) return;
-    await api(`/api/v1/vms/${encodeURIComponent(selectedVm)}`, { method: 'DELETE' });
-    setSelectedVm('');
-  });
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const deleteVm = () => {
+    if (!selectedVm) return;
+    if (!confirmDelete) { setConfirmDelete(true); return; }
+    setConfirmDelete(false);
+    runAction('Delete VM', async () => {
+      await api(`/api/v1/vms/${encodeURIComponent(selectedVm)}`, { method: 'DELETE' });
+      setSelectedVm('');
+    });
+  };
 
   const createVm = () => runAction('Create VM', async () => {
     const id = createDraft.id.trim();
@@ -533,22 +563,24 @@ export function App() {
         <button onClick={() => setVmTab('create')}>New VM</button>
       </div>
 
-      {filteredVms.length === 0 ? (
-        <div className="empty">No VM matched.</div>
-      ) : (
-        filteredVms.map((id) => {
-          const detail = vmDetailsMap.get(id);
-          return (
-            <button key={id} className={cls('vm-tree-item', selectedVm === id && 'active')} onClick={() => setSelectedVm(id)}>
-              <div className="vm-tree-main">
-                <strong>{id}</strong>
-                <Chip value={detail?.state} />
-              </div>
-              <div className="vm-tree-meta">CPU {detail?.vcpus ?? '-'} • RAM {detail?.memory_mb ?? '-'} MB</div>
-            </button>
-          );
-        })
-      )}
+      <div className="vm-tree-list">
+        {filteredVms.length === 0 ? (
+          <div className="empty">No VM matched.</div>
+        ) : (
+          filteredVms.map((id) => {
+            const detail = vmDetailsMap.get(id);
+            return (
+              <button key={id} className={cls('vm-tree-item', selectedVm === id && 'active')} onClick={() => setSelectedVm(id)}>
+                <div className="vm-tree-main">
+                  <strong>{id}</strong>
+                  <Chip value={detail?.state} />
+                </div>
+                <div className="vm-tree-meta">CPU {detail?.vcpus ?? '-'} &bull; RAM {detail?.memory_mb ?? '-'} MB</div>
+              </button>
+            );
+          })
+        )}
+      </div>
     </div>
   );
 
@@ -573,7 +605,14 @@ export function App() {
               <button onClick={stopVm} disabled={!selectedVm || busy}>Stop</button>
               <button onClick={openConsole} disabled={!selectedVm}>Console</button>
               <button onClick={runBackup} disabled={!selectedVm || busy}>Backup</button>
-              <button className="danger" onClick={deleteVm} disabled={!selectedVm || busy}>Delete</button>
+              {confirmDelete ? (
+                <>
+                  <button className="danger" onClick={deleteVm} disabled={busy}>Confirm Delete</button>
+                  <button onClick={() => setConfirmDelete(false)}>Cancel</button>
+                </>
+              ) : (
+                <button className="danger" onClick={deleteVm} disabled={!selectedVm || busy}>Delete</button>
+              )}
             </div>
           </div>
 
@@ -653,8 +692,15 @@ export function App() {
                 <h3>First Boot Workflow</h3>
                 <p className="muted">Attach ISO → set CDROM boot → start installer in one action.</p>
                 <div className="actions">
-                  <input value={firstBootIso} onChange={(e) => setFirstBootIso(e.target.value)} placeholder="/var/lib/libvirt/boot/ubuntu.iso" />
-                  <select value={firstBootIso} onChange={(e) => setFirstBootIso(e.target.value)}>
+                  <input
+                    value={firstBootIso}
+                    onChange={(e) => setFirstBootIso(e.target.value)}
+                    placeholder="/var/lib/libvirt/boot/ubuntu.iso"
+                  />
+                  <select
+                    value={state.isoLibrary.some((iso) => iso.path === firstBootIso) ? firstBootIso : ''}
+                    onChange={(e) => { if (e.target.value) setFirstBootIso(e.target.value); }}
+                  >
                     <option value="">Choose from ISO library</option>
                     {state.isoLibrary.map((iso) => <option key={iso.path} value={iso.path}>{iso.name}</option>)}
                   </select>
@@ -761,11 +807,14 @@ export function App() {
 
   return (
     <div className="layout">
-      <aside className="sidebar">
+      {/* Mobile sidebar toggle */}
+      <button className="sidebar-toggle" aria-label="Toggle sidebar" onClick={() => setSidebarOpen((o) => !o)}>☰</button>
+
+      <aside className={cls('sidebar', sidebarOpen && 'open')}>
         <h1>Potorix</h1>
         <nav>
           {NAV_ITEMS.map(([key, label]) => (
-            <button key={key} className={cls('nav-btn', view === key && 'active')} onClick={() => setView(key)}>{label}</button>
+            <button key={key} className={cls('nav-btn', view === key && 'active')} onClick={() => { setView(key); setSidebarOpen(false); }}>{label}</button>
           ))}
         </nav>
       </aside>

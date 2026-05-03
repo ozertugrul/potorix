@@ -51,7 +51,7 @@ class MetricsCollectorJob
 
       vcpus = [values['vcpu.current'].to_i, 1].max
       cpu_time_ns = values['cpu.time'].to_i
-      mem_current = values['balloon.current'].to_i
+      mem_current = values['balloon.rss'] ? values['balloon.rss'].to_i : values['balloon.current'].to_i
       mem_max = values['balloon.maximum'].to_i
       mem_pct = mem_max.positive? ? ((mem_current.to_f / mem_max.to_f) * 100.0) : 0.0
 
@@ -179,7 +179,7 @@ class MetricsCollectorJob
   end
 
   def domstats_all_output
-    out, status = Open3.capture2e('virsh', '--connect', ENV.fetch('HYPERVISOR_URI', 'qemu:///system'), 'domstats', '--list-active', '--vcpu', '--balloon', '--block', '--interface')
+    out, status = Open3.capture2e('virsh', '--connect', ENV.fetch('HYPERVISOR_URI', 'qemu:///system'), 'domstats', '--list-active', '--cpu-total', '--vcpu', '--balloon', '--block', '--interface')
     raise out unless status.success?
 
     out

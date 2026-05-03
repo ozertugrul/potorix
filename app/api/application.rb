@@ -21,9 +21,22 @@ require_relative '../jobs/backup_run_job'
 require_relative '../jobs/metrics_collector_job'
 
 class Application < Sinatra::Base
-  VM_USAGE_CACHE = {}
-  CONSOLE_TICKETS = {}
+  # Thread-safe per-VM usage cache: guarded by a dedicated Mutex so that
+  # concurrent Puma threads cannot corrupt the hash during delta calculations.
+  VM_USAGE_CACHE       = {}
+  VM_USAGE_CACHE_MUTEX = Mutex.new
+
+  CONSOLE_TICKETS       = {}
   CONSOLE_TICKETS_MUTEX = Mutex.new
+
+  # Resolved once at startup to avoid a shell fork on every VNC ticket request.
+  GATEWAY_IP = begin
+    out, st = Open3.capture2e('sh', '-c', "ip route | awk '/default/ {print $3; exit}'")
+    (st.success? && !out.strip.empty?) ? out.strip : '172.17.0.1'
+  rescue StandardError
+    '172.17.0.1'
+  end
+
   set :bind, '0.0.0.0'
   set :port, ENV.fetch('APP_PORT', 9292)
   set :static, true
@@ -128,7 +141,7 @@ class Application < Sinatra::Base
     display = Hypervisor::VirshAdapter.new.vnc_display(vm_id)
     halt 409, Oj.dump(error: 'VM is not running; VNC not available') if display.nil?
     port = display.start_with?(':') ? (5900 + display[1..].to_i) : Integer(display)
-    target_host = ENV.fetch('VNC_PROXY_TARGET_HOST', default_gateway_ip)
+    target_host = ENV.fetch('VNC_PROXY_TARGET_HOST', GATEWAY_IP)
     logger.info("[ws/vnc] tenant=#{tenant_id} vm=#{vm_id} target=#{target_host}:#{port}")
 
     ws = Faye::WebSocket.new(env, nil, ping: 20)
@@ -167,6 +180,7 @@ class Application < Sinatra::Base
   end
 
   get '/health' do
+    content_type :json
     Oj.dump(status: 'ok', env: ENV.fetch('APP_ENV', 'development'))
   end
 
@@ -211,7 +225,7 @@ class Application < Sinatra::Base
     authorize!('vm:read')
 
     nodeinfo_out, _ = Open3.capture2e('virsh', '--connect', ENV.fetch('HYPERVISOR_URI', 'qemu:///system'), 'nodeinfo')
-    cpu_total = nodeinfo_out[/CPU\(s\):\s+(\d+)/, 1].to_i
+    cpu_total    = nodeinfo_out[/CPU\(s\):\s+(\d+)/, 1].to_i
     mem_total_mb = (nodeinfo_out[/Memory size:\s+(\d+)\s+KiB/, 1].to_i / 1024.0).round
 
     disk_dir = ENV.fetch('VM_DISK_DIR', '/var/lib/libvirt/images')
@@ -219,17 +233,22 @@ class Application < Sinatra::Base
     df_line = df_out.split("\n")[1].to_s
     cols = df_line.split(/\s+/)
     disk_total_gb = (cols[1].to_i / 1024.0 / 1024.0).round(1)
-    disk_free_gb = (cols[3].to_i / 1024.0 / 1024.0).round(1)
+    disk_free_gb  = (cols[3].to_i / 1024.0 / 1024.0).round(1)
 
-    vm_ids = DB[:tenant_vms].where(tenant_id: @tenant_id).select_map(:vm_id)
+    vm_ids  = DB[:tenant_vms].where(tenant_id: @tenant_id).select_map(:vm_id)
     adapter = Hypervisor::VirshAdapter.new
-    details = vm_ids.map { |id| adapter.vm_details(id) rescue nil }.compact
-    running = details.count { |d| d[:state].to_s.downcase.include?('running') }
-    alloc_vcpus = details.sum { |d| d[:vcpus].to_i }
+
+    # Collect details in parallel threads to avoid serial virsh calls (N+1).
+    details = vm_ids.map do |id|
+      Thread.new { adapter.vm_details(id) rescue nil }
+    end.filter_map(&:value)
+
+    running      = details.count { |d| d[:state].to_s.downcase.include?('running') }
+    alloc_vcpus  = details.sum { |d| d[:vcpus].to_i }
     alloc_mem_mb = details.sum { |d| d[:memory_mb].to_i }
     alloc_disk_gb = details.sum do |d|
       Array(d[:disks]).sum do |disk|
-        next 0 unless disk[:device] == 'disk' && File.file?(disk[:source])
+        next 0 unless disk[:device] == 'disk' && File.file?(disk[:source].to_s)
 
         File.size(disk[:source]) / 1024.0 / 1024.0 / 1024.0
       end
@@ -512,16 +531,23 @@ class Application < Sinatra::Base
   get '/api/v1/vms/details' do
     authorize!('vm:read')
     adapter = Hypervisor::VirshAdapter.new
-    rows = DB[:tenant_vms].where(tenant_id: @tenant_id).select_map(:vm_id).map do |vm_id|
+    vm_ids  = DB[:tenant_vms].where(tenant_id: @tenant_id).select_map(:vm_id)
+
+    # Fetch all profiles in a single query to avoid N+1 DB hits.
+    profiles_by_vm = DB[:vm_profiles]
+                     .where(tenant_id: @tenant_id, vm_id: vm_ids)
+                     .each_with_object({}) do |row, acc|
+      acc[row[:vm_id]] = (Oj.load(row[:config_json]) rescue {})
+    end
+
+    rows = vm_ids.map do |vm_id|
+      wizard = profiles_by_vm[vm_id] || {}
       begin
-        detail = adapter.vm_details(vm_id)
-        profile = DB[:vm_profiles].where(tenant_id: @tenant_id, vm_id: vm_id).first
-        wizard = profile ? (Oj.load(profile[:config_json]) rescue {}) : {}
-        detail.merge(wizard: wizard)
+        adapter.vm_details(vm_id).merge(wizard: wizard)
       rescue Hypervisor::VirshAdapter::CommandError
-        profile = DB[:vm_profiles].where(tenant_id: @tenant_id, vm_id: vm_id).first
-        wizard = profile ? (Oj.load(profile[:config_json]) rescue {}) : {}
-        { id: vm_id, state: 'unknown', vcpus: nil, memory_mb: nil, boot_order: [], boot_primary: nil, iso_path: nil, network_mode: nil, network_source: nil, wizard: wizard }
+        { id: vm_id, state: 'unknown', vcpus: nil, memory_mb: nil,
+          boot_order: [], boot_primary: nil, iso_path: nil,
+          network_mode: nil, network_source: nil, wizard: wizard }
       end
     end
     Oj.dump(data: rows)
@@ -831,7 +857,7 @@ class Application < Sinatra::Base
     display = Hypervisor::VirshAdapter.new.vnc_display(vm_id)
     halt 409, Oj.dump(error: 'VM is not running; VNC not available') if display.nil?
     port = display.start_with?(':') ? (5900 + display[1..].to_i) : Integer(display)
-    target_host = ENV.fetch('VNC_PROXY_TARGET_HOST', default_gateway_ip)
+    target_host = ENV.fetch('VNC_PROXY_TARGET_HOST', GATEWAY_IP)
     token = "vnc-#{SecureRandom.hex(12)}"
     token_file = ENV.fetch('WEBSOCKIFY_TOKEN_FILE', '/tmp/websockify/tokens')
     public_url = ENV.fetch('WEBSOCKIFY_PUBLIC_URL', '').to_s
@@ -915,7 +941,7 @@ class Application < Sinatra::Base
     net_bytes = stats.select { |k, _| k =~ /^net\.\d+\.(rx|tx)\.bytes$/ }.values.sum(&:to_i)
 
     now = Time.now.to_f
-    prev = VM_USAGE_CACHE[vm_id]
+    prev = VM_USAGE_CACHE_MUTEX.synchronize { VM_USAGE_CACHE[vm_id] }
     elapsed = prev ? (now - prev[:ts]) : 0.0
     cpu_pct = 0.0
     disk_io_pct = 0.0
@@ -927,19 +953,21 @@ class Application < Sinatra::Base
       cpu_pct = (cpu_delta / (elapsed * 1_000_000_000.0 * vcpus)) * 100.0
 
       disk_delta = [disk_bytes - prev[:disk_bytes].to_i, 0].max
-      net_delta = [net_bytes - prev[:net_bytes].to_i, 0].max
-      disk_mb_s = disk_delta / elapsed / 1024.0 / 1024.0
-      net_mb_s = net_delta / elapsed / 1024.0 / 1024.0
-      disk_io_pct = (disk_mb_s / 200.0) * 100.0 # 200 MB/s ~= 100%
-      net_pct = (net_mb_s / 125.0) * 100.0 # 1 Gbps ~= 125 MB/s
+      net_delta  = [net_bytes  - prev[:net_bytes].to_i,  0].max
+      disk_mb_s  = disk_delta / elapsed / 1024.0 / 1024.0
+      net_mb_s   = net_delta  / elapsed / 1024.0 / 1024.0
+      disk_io_pct = (disk_mb_s / 200.0) * 100.0  # 200 MB/s baseline → 100%
+      net_pct     = (net_mb_s  / 125.0) * 100.0  # 1 Gbps baseline  → 100%
     end
 
-    VM_USAGE_CACHE[vm_id] = {
-      ts: now,
-      cpu_time_ns: cpu_time_ns,
-      disk_bytes: disk_bytes,
-      net_bytes: net_bytes
-    }
+    VM_USAGE_CACHE_MUTEX.synchronize do
+      VM_USAGE_CACHE[vm_id] = {
+        ts: now,
+        cpu_time_ns: cpu_time_ns,
+        disk_bytes: disk_bytes,
+        net_bytes: net_bytes
+      }
+    end
 
     ram_pct = mem_max.positive? ? (mem_current.to_f / mem_max.to_f) * 100.0 : 0.0
     Oj.dump(data: {
@@ -1197,12 +1225,9 @@ class Application < Sinatra::Base
     }
   end
 
+  # Kept for compatibility but now delegates to the startup constant.
   def default_gateway_ip
-    out, status = Open3.capture2e('sh', '-c', "ip route | awk '/default/ {print $3; exit}'")
-    return '172.17.0.1' unless status.success?
-
-    ip = out.to_s.strip
-    ip.empty? ? '172.17.0.1' : ip
+    GATEWAY_IP
   end
 
   def parse_domstats(output)

@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useRef } from 'react';
 import { Area, AreaChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { Activity, ArrowUpDown, Copy, HardDrive, LayoutDashboard, Monitor, Play, Power, RotateCcw, Server, Shield, Trash2, Camera, Terminal, PowerOff, Rocket, PauseCircle, PlusCircle } from 'lucide-react';
+import { Activity, ArrowUpDown, Copy, HardDrive, LayoutDashboard, Monitor, Play, Power, RotateCcw, Server, Shield, Trash2, Camera, Terminal, PowerOff, Rocket, PauseCircle, PlusCircle, Cpu, MemoryStick, Network } from 'lucide-react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useIsoLibraryQuery, useSystemMetricsQuery, useSystemUsageQuery, useVmMetricsQuery, useVmDetailQuery, useVmOperationsQuery, useVmsQuery } from '../hooks/useVmQueries';
 import { useVmAction } from '../hooks/useVmActions';
@@ -14,6 +14,7 @@ import { Table } from '../components/ui/Table';
 import { Tabs } from '../components/ui/Tabs';
 import { Skeleton } from '../components/ui/Skeleton';
 import { ToastViewport } from '../components/ui/ToastViewport';
+import { VmCreateDrawer } from '../components/vm/VmCreateDrawer';
 
 const tabItems = [
   { key: 'summary', label: 'Summary' },
@@ -29,61 +30,7 @@ const tabItems = [
   { key: 'tasks', label: 'Tasks' }
 ];
 
-type CreateVmForm = {
-  id: string;
-  name: string;
-  node: string;
-  osFamily: 'linux' | 'windows' | 'other';
-  osVersion: string;
-  cpuSockets: number;
-  cpuCores: number;
-  memoryMb: number;
-  diskGb: number;
-  diskBus: 'scsi' | 'sata' | 'virtio';
-  networkMode: 'bridge' | 'nat' | 'private';
-  networkSource: string;
-  nicModel: 'virtio' | 'e1000' | 'vmxnet3';
-  isoPath: string;
-  cloudInitUser: string;
-  cloudInitNetwork: 'dhcp' | 'static';
-  staticIp: string;
-  gateway: string;
-  dns: string;
-  vlanId: string;
-  timezone: string;
-  startAtBoot: boolean;
-  firewallEnabled: boolean;
-  snapshotOnCreate: boolean;
-  storagePool: string;
-};
 
-const defaultCreateVmForm: CreateVmForm = {
-  id: '200',
-  name: 'new-vm',
-  node: 'node-a',
-  osFamily: 'linux',
-  osVersion: 'Ubuntu 24.04 LTS',
-  cpuSockets: 1,
-  cpuCores: 2,
-  memoryMb: 4096,
-  diskGb: 40,
-  diskBus: 'scsi',
-  networkMode: 'nat',
-  networkSource: 'default',
-  nicModel: 'virtio',
-  isoPath: '',
-  cloudInitUser: 'admin',
-  cloudInitNetwork: 'dhcp',
-  staticIp: '',
-  gateway: '',
-  dns: '1.1.1.1',
-  vlanId: '',
-  timezone: 'UTC',
-  startAtBoot: true,
-  firewallEnabled: true,
-  snapshotOnCreate: false
-  ,storagePool: 'default'
-};
 
 type SidebarView = 'dashboard' | 'resources' | 'images';
 
@@ -95,15 +42,31 @@ export function VmDetailPage() {
   const [createVmOpen, setCreateVmOpen] = useState(false);
   const [fullConsole, setFullConsole] = useState(false);
   const [captureKeyboard, setCaptureKeyboard] = useState(false);
+  const consoleRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setFullConsole(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, []);
+
+  const toggleFullscreen = async () => {
+    try {
+      if (!document.fullscreenElement) {
+        await consoleRef.current?.requestFullscreen();
+      } else {
+        await document.exitFullscreen();
+      }
+    } catch (err) {
+      console.warn('Fullscreen request failed', err);
+    }
+  };
   const [snapshotName, setSnapshotName] = useState('quick-snap');
   const [newTag, setNewTag] = useState('');
   const [newRule, setNewRule] = useState({ direction: 'IN', action: 'ACCEPT', source: '0.0.0.0/0', destination: '10.0.0.10', port: '443' });
-  const [createVmForm, setCreateVmForm] = useState<CreateVmForm>(defaultCreateVmForm);
-  const [cloneOpen, setCloneOpen] = useState(false);
-  const [cloneTargetId, setCloneTargetId] = useState('');
-  const [cloneType, setCloneType] = useState<'full' | 'linked'>('full');
-  const [createStep, setCreateStep] = useState(0);
-  const [showAdvancedCreate, setShowAdvancedCreate] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [storagePools, setStoragePools] = useState<Array<{ name: string; state: string }>>([]);
   const [isoImportSourcePath, setIsoImportSourcePath] = useState('');
   const [isoUploadFile, setIsoUploadFile] = useState<File | null>(null);
@@ -176,6 +139,9 @@ export function VmDetailPage() {
     }
   }, [allVms, selectedVmId, setPrimaryVm]);
 
+  // Reset delete confirmation when VM changes
+  useEffect(() => { setConfirmDelete(false); }, [selectedVmId]);
+
   const start = useVmAction(selectedVmId, 'start');
   const stop = useVmAction(selectedVmId, 'stop');
   const reboot = useVmAction(selectedVmId, 'reboot');
@@ -195,25 +161,6 @@ export function VmDetailPage() {
     }
   });
 
-  const createVmMutation = useMutation({
-    mutationFn: () => backendVmApi.createVm(createVmForm),
-    onSuccess: (createdVm) => {
-      queryClient.invalidateQueries({ queryKey: ['vms'] });
-      setPrimaryVm(createdVm.id);
-      setSidebarView('resources');
-      setCreateVmOpen(false);
-      setCreateStep(0);
-      setShowAdvancedCreate(false);
-      setCreateVmForm((prev) => ({
-        ...defaultCreateVmForm,
-        id: String(Math.max(100, Number(prev.id || 100) + 1))
-      }));
-      pushToast({ kind: 'success', title: 'VM created', message: `${createdVm.name} is ready for first boot.` });
-    },
-    onError: (error: Error) => {
-      pushToast({ kind: 'error', title: 'Create failed', message: error.message });
-    }
-  });
 
   const importIsoMutation = useMutation({
     mutationFn: async () => backendVmApi.importIso(isoImportSourcePath),
@@ -260,8 +207,13 @@ export function VmDetailPage() {
     return [...taskEvents, ...snapEvents].sort((a, b) => (a.at < b.at ? 1 : -1)).slice(0, 15);
   }, [vm]);
 
-  const canStart = vm?.status === 'stopped';
-  const canStop = vm?.status === 'running';
+  const isTaskRunning = useMemo(() => {
+    if (!vm) return false;
+    return vm.tasks.some(t => t.status === 'running' && ['start', 'stop', 'purge', 'reboot'].includes(t.action));
+  }, [vm]);
+
+  const canStart = vm?.status === 'stopped' && !isTaskRunning;
+  const canStop = vm?.status === 'running' && !isTaskRunning;
   const consoleUrl = useMemo(() => {
     if (!vm) return '';
     let tenant = 'tenant-a';
@@ -272,52 +224,18 @@ export function VmDetailPage() {
     } catch {
       // ignore storage access failures
     }
-    const params = new URLSearchParams({ tenant, token, vm_id: vm.id });
+    const params = new URLSearchParams({ tenant, token, vm_id: vm.id, resize: 'scale' });
     return `/novnc.html?${params.toString()}`;
   }, [vm]);
 
-  const createSteps = ['Identity', 'Compute', 'Storage & Network', 'Review'];
-  const createValidationErrors = useMemo(() => {
-    const errors: string[] = [];
-    if (!createVmForm.id.trim()) errors.push('VM ID is required');
-    if (!createVmForm.name.trim()) errors.push('VM name is required');
-    if (existingVmIds.has(createVmForm.id.trim())) errors.push(`VM ID ${createVmForm.id.trim()} already exists`);
-    const normalizedName = createVmForm.name.trim().toLowerCase();
-    if (normalizedName && existingVmNames.has(normalizedName)) errors.push(`VM name '${createVmForm.name.trim()}' already exists`);
-    if (!createVmForm.node.trim()) errors.push('Node is required');
-    if (createVmForm.cpuSockets < 1 || createVmForm.cpuCores < 1) errors.push('CPU sockets/cores must be at least 1');
-    if (createVmForm.memoryMb < 512) errors.push('Memory must be at least 512 MB');
-    if (createVmForm.diskGb < 8) errors.push('Disk must be at least 8 GB');
-    if (!createVmForm.networkSource.trim()) errors.push('Network source is required');
-    if (createVmForm.cloudInitNetwork === 'static' && !createVmForm.staticIp.trim()) errors.push('Static IP is required when static network is selected');
-    return errors;
-  }, [createVmForm, existingVmIds, existingVmNames]);
-
-  const createStepHasError = (index: number) => {
-    if (index === 0) return !createVmForm.id.trim() || !createVmForm.name.trim() || !createVmForm.node.trim();
-    if (index === 1) return createVmForm.cpuSockets < 1 || createVmForm.cpuCores < 1 || createVmForm.memoryMb < 512;
-    if (index === 2) {
-      if (createVmForm.diskGb < 8 || !createVmForm.networkSource.trim()) return true;
-      if (createVmForm.cloudInitNetwork === 'static' && !createVmForm.staticIp.trim()) return true;
-    }
-    return false;
-  };
-
   const openCreateWizard = () => {
-    const preferredIso = isoLibraryQuery.data?.[0]?.path || '';
     setCreateVmOpen(true);
-    setCreateStep(0);
-    setShowAdvancedCreate(false);
-    setCreateVmForm((s) => ({ ...s, id: suggestedNextVmId, isoPath: s.isoPath || preferredIso }));
   };
 
   useEffect(() => {
     backendVmApi.getStoragePools()
       .then((rows) => {
         setStoragePools(rows.map((r) => ({ name: r.name, state: r.state })));
-        if (rows.length > 0) {
-          setCreateVmForm((s) => ({ ...s, storagePool: s.storagePool || rows[0].name }));
-        }
       })
       .catch(() => {
         setStoragePools([{ name: 'default', state: 'active' }]);
@@ -410,37 +328,46 @@ export function VmDetailPage() {
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="created_at" tickFormatter={(time) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} />
                     <YAxis tickFormatter={(val) => `${val}%`} />
-                    <Tooltip formatter={(value: number) => `${Number(value).toFixed(1)}%`} labelFormatter={(label) => new Date(label).toLocaleString()} />
+                    <Tooltip formatter={(value: any) => `${Number(value).toFixed(1)}%`} labelFormatter={(label) => new Date(label).toLocaleString()} />
                     <Legend verticalAlign="top" height={36} />
-                    <Area type="monotone" dataKey="cpu" name="CPU Yükü" stroke="#2563eb" fill="#93c5fd" fillOpacity={0.45} />
-                    <Area type="monotone" dataKey="ram" name="RAM Yükü" stroke="#22c55e" fill="#86efac" fillOpacity={0.3} />
+                    <Area type="monotone" dataKey="cpu" name="CPU Load" stroke="#2563eb" fill="#93c5fd" fillOpacity={0.45} />
+                    <Area type="monotone" dataKey="ram" name="RAM Usage" stroke="#22c55e" fill="#86efac" fillOpacity={0.3} />
                   </AreaChart>
                 </ResponsiveContainer>
               </Card>
 
-              <Card title="Network Activity">
+              <Card title="Host Network Activity">
                 <ResponsiveContainer width="100%" height={230}>
                   <AreaChart data={dashboardSeries}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="created_at" tickFormatter={(time) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} />
                     <YAxis tickFormatter={(val) => `${Number(val).toFixed(1)} Mbps`} />
-                    <Tooltip formatter={(value: number) => `${Number(value).toFixed(2)} Mbps`} labelFormatter={(label) => new Date(label).toLocaleString()} />
+                    <Tooltip formatter={(value: any) => `${Number(value).toFixed(2)} Mbps`} labelFormatter={(label) => new Date(label).toLocaleString()} />
                     <Legend verticalAlign="top" height={36} />
-                    <Area type="monotone" dataKey="net_rx_mbps" name="RX Mbps" stroke="#f59e0b" fill="#fde68a" fillOpacity={0.35} />
-                    <Area type="monotone" dataKey="net_tx_mbps" name="TX Mbps" stroke="#ea580c" fill="#fdba74" fillOpacity={0.3} />
+                    <Area type="monotone" dataKey="net_rx_mbps" name="RX (Download)" stroke="#8b5cf6" fill="#c4b5fd" fillOpacity={0.4} />
+                    <Area type="monotone" dataKey="net_tx_mbps" name="TX (Upload)" stroke="#f59e0b" fill="#fde68a" fillOpacity={0.35} />
                   </AreaChart>
                 </ResponsiveContainer>
               </Card>
             </div>
 
             <div className="grid-2">
+              <Card title="Live Statistics">
+                <div className="stats-grid">
+                  <div><span>CPU Load</span><strong>{(dashboardSeries.at(-1)?.cpu ?? 0).toFixed(1)}%</strong></div>
+                  <div><span>RAM Usage</span><strong>{(dashboardSeries.at(-1)?.ram ?? 0).toFixed(1)}%</strong></div>
+                  <div><span>Load Avg (1m)</span><strong>{(dashboardSeries.at(-1)?.load ?? 0).toFixed(3)}</strong></div>
+                  <div><span>Network Traffic</span><strong>{((dashboardSeries.at(-1)?.net_rx_mbps ?? 0) + (dashboardSeries.at(-1)?.net_tx_mbps ?? 0)).toFixed(2)} Mbps</strong></div>
+                </div>
+              </Card>
+
               <Card title="Host Load Average (1m)">
                 <ResponsiveContainer width="100%" height={230}>
                   <AreaChart data={dashboardSeries}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="created_at" tickFormatter={(time) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} />
                     <YAxis />
-                    <Tooltip formatter={(value: number) => Number(value).toFixed(3)} labelFormatter={(label) => new Date(label).toLocaleString()} />
+                    <Tooltip formatter={(value: any) => Number(value).toFixed(3)} labelFormatter={(label) => new Date(label).toLocaleString()} />
                     <Legend verticalAlign="top" height={36} />
                     <Area type="monotone" dataKey="load" name="Load Avg (1m)" stroke="#7c3aed" fill="#c4b5fd" fillOpacity={0.35} />
                   </AreaChart>
@@ -522,67 +449,48 @@ export function VmDetailPage() {
 
         {sidebarView === 'resources' && (
           <>
-            <div className="sticky-actions">
-              <div>
-                <h1>{vm ? `${vm.name} (VM ${vm.id})` : 'Create or Select VM'}</h1>
-                <p>{vm ? `${vm.node} • ${vm.status.toUpperCase()} • ${vm.uptime}` : 'Start by creating your first machine from New VM.'}</p>
+            {vm ? (
+              <div className="vm-hero">
+                <div className="vm-hero-info">
+                  <h1><Server size={22} color="#1d4ed8" /> {vm.name}</h1>
+                  <div className="vm-hero-meta">
+                    <span><strong>ID:</strong> {vm.id}</span>
+                    <span><strong>Node:</strong> {vm.node}</span>
+                    <span><strong>Status:</strong> <strong className={`badge ${vm.status}`}>{vm.status.toUpperCase()}</strong></span>
+                    <span><strong>Uptime:</strong> {vm.uptime}</span>
+                    <span><strong>IP:</strong> {vm.guestAgent?.addresses?.find((a: any) => a.protocol === 'ipv4')?.address || 'N/A'}</span>
+                  </div>
+                </div>
+                <div className="actions">
+                  <Button icon={<Play size={14} />} loading={start.isPending || actionLoading.start} disabled={!canStart} onClick={() => start.mutate()}>Start</Button>
+                  <Button icon={<Power size={14} />} loading={stop.isPending || actionLoading.stop} disabled={!canStop} onClick={() => stop.mutate()}>Stop</Button>
+                  <Button icon={<RotateCcw size={14} />} loading={reboot.isPending || actionLoading.reboot} disabled={!canStop} onClick={() => reboot.mutate()}>Reboot</Button>
+                  <Button icon={<PowerOff size={14} />} loading={shutdown.isPending || actionLoading.shutdown} disabled={!canStop} onClick={() => shutdown.mutate()}>Shutdown</Button>
+                  <Button icon={<Terminal size={14} />} disabled={!vm} onClick={() => setTab('console')}>Console</Button>
+                  <Button icon={<Camera size={14} />} loading={quickSnap.isPending || actionLoading.snapshot} disabled={!vm} onClick={() => quickSnap.mutate()}>Snapshot</Button>
+                  {confirmDelete ? (
+                    <div style={{ display: 'flex', gap: '6px' }}>
+                      <Button variant="danger" loading={remove.isPending || actionLoading.delete} onClick={() => remove.mutate(undefined, { onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['vms'] }); setPrimaryVm(null); } })}>Confirm</Button>
+                      <Button onClick={() => setConfirmDelete(false)}>Cancel</Button>
+                    </div>
+                  ) : (
+                    <Button icon={<Trash2 size={14} />} variant="danger" disabled={!vm} onClick={() => setConfirmDelete(true)}>Delete</Button>
+                  )}
+                  <Button icon={<PlusCircle size={14} />} onClick={openCreateWizard}>New VM</Button>
+                </div>
               </div>
-              <div className="action-grid">
-                <Button icon={<Play size={15} />} loading={start.isPending || actionLoading.start} disabled={!canStart} onClick={() => start.mutate()}>Start</Button>
-                <Button icon={<Power size={15} />} loading={stop.isPending || actionLoading.stop} disabled={!canStop} onClick={() => stop.mutate()}>Stop</Button>
-                <Button icon={<RotateCcw size={15} />} loading={reboot.isPending || actionLoading.reboot} disabled={!canStop} onClick={() => reboot.mutate()}>Reboot</Button>
-                <Button icon={<PowerOff size={15} />} loading={shutdown.isPending || actionLoading.shutdown} disabled={!canStop} onClick={() => shutdown.mutate()}>Shutdown</Button>
-                <Button icon={<Terminal size={15} />} disabled={!vm} onClick={() => setTab('console')}>Console</Button>
-                <Button icon={<Copy size={15} />} disabled={!vm} onClick={() => {
-                  if (!vm) return;
-                  setCloneTargetId(String(Number(vm.id) + 1));
-                  setCloneType('full');
-                  setCloneOpen(true);
-                }}>Clone</Button>
-                <Button icon={<Rocket size={15} />} disabled={!vm} onClick={async () => {
-                  if (!vm) return;
-                  await backendVmApi.markVmAsTemplate(vm.id);
-                  pushToast({ kind: 'success', title: 'Template enabled', message: `${vm.id} marked as template.` });
-                }}>Make Template</Button>
-                <Button icon={<ArrowUpDown size={15} />} disabled={!vm} onClick={async () => {
-                  if (!vm) return;
-                  const destination = window.prompt('Destination libvirt URI', 'qemu+ssh://root@target/system')?.trim() || '';
-                  if (!destination) return;
-                  await backendVmApi.migrateVm(vm.id, destination, true, false);
-                  queryClient.invalidateQueries({ queryKey: ['vms'] });
-                  pushToast({ kind: 'success', title: 'Migrate queued', message: `${vm.id} -> ${destination}` });
-                }}>Migrate</Button>
-                <Button icon={<Camera size={15} />} loading={quickSnap.isPending || actionLoading.snapshot} disabled={!vm} onClick={() => quickSnap.mutate()}>Snapshot</Button>
-                <Button icon={<Trash2 size={15} />} variant="danger" loading={remove.isPending || actionLoading.delete} disabled={!vm} onClick={() => {
-                  if (!vm || !window.confirm(`Delete ${vm.name} permanently?`)) return;
-                  remove.mutate(undefined, {
-                    onSuccess: () => {
-                      queryClient.invalidateQueries({ queryKey: ['vms'] });
-                      setPrimaryVm(null);
-                    }
-                  });
-                }}>Delete</Button>
-                <Button icon={<Trash2 size={15} />} variant="danger" loading={purge.isPending || actionLoading.purge} disabled={!vm} onClick={() => {
-                  if (!vm || !window.confirm(`Purge ${vm.name} irreversibly? This removes VM, disks and records permanently.`)) return;
-                  purge.mutate(undefined, {
-                    onSuccess: () => {
-                      queryClient.invalidateQueries({ queryKey: ['vms'] });
-                      setPrimaryVm(null);
-                      pushToast({ kind: 'success', title: 'Purge queued', message: `${vm.name} will be permanently removed.` });
-                    }
-                  });
-                }}>Purge</Button>
+            ) : (
+              <div className="sticky-actions" style={{ justifyContent: 'flex-end', paddingBottom: '16px' }}>
                 <Button icon={<PlusCircle size={15} />} onClick={openCreateWizard}>New VM</Button>
               </div>
-            </div>
-
+            )}
             {!vm && vmCount > 0 && <Card><Skeleton className="h-24" /></Card>}
 
             {!vm && vmCount === 0 && (
               <Card title="No virtual machines yet">
-                <div className="empty-state">
-                  <Activity size={20} />
-                  <p>Create your first VM to unlock console, snapshots, backup, monitoring and full lifecycle actions.</p>
+                <div className="empty-state" style={{ textAlign: 'center', padding: '40px' }}>
+                  <Activity size={32} style={{ color: '#94a3b8', marginBottom: '16px' }} />
+                  <p style={{ color: '#475569', marginBottom: '24px' }}>Create your first VM to unlock console, snapshots, backup, monitoring and full lifecycle actions.</p>
                   <Button icon={<PlusCircle size={15} />} onClick={openCreateWizard}>Create First VM</Button>
                 </div>
               </Card>
@@ -608,44 +516,83 @@ export function VmDetailPage() {
                 <Tabs value={tab} onChange={setTab} items={tabItems} />
 
                 {tab === 'summary' && (
-                  <div className="grid-2">
-                    <Card title="VM Health Overview">
-                      {metricsQuery.isLoading ? <Skeleton className="h-56" /> : (
-                        <ResponsiveContainer width="100%" height={220}>
-                          <AreaChart data={vmMetricSeries}>
-                            <defs><linearGradient id="cpu" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3b82f6" stopOpacity={0.8}/><stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/></linearGradient></defs>
-                            <CartesianGrid strokeDasharray="3 3" />
-                            <XAxis dataKey="created_at" tickFormatter={(time) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} />
-                            <YAxis tickFormatter={(val) => `${val}%`} />
-                            <Tooltip formatter={(value: number) => `${Number(value).toFixed(1)}%`} labelFormatter={(label) => new Date(label).toLocaleString()} />
-                            <Legend verticalAlign="top" height={36} />
-                            <Area type="monotone" dataKey="cpu" name="CPU Yükü" stroke="#3b82f6" fillOpacity={1} fill="url(#cpu)" />
-                            <Area type="monotone" dataKey="ram" name="RAM Yükü" stroke="#22c55e" fillOpacity={0.3} fill="#86efac" />
-                          </AreaChart>
-                        </ResponsiveContainer>
-                      )}
-                    </Card>
-                    <Card title="Summary Cards">
-                      <div className="stats-grid">
-                        <div><span>CPU</span><strong>{(vmMetricSeries.at(-1)?.cpu ?? 0).toFixed(1)}%</strong></div>
-                        <div><span>RAM</span><strong>{(vmMetricSeries.at(-1)?.ram ?? 0).toFixed(1)}%</strong></div>
-                        <div><span>Disk IO</span><strong>{(vmMetricSeries.at(-1)?.disk_iops ?? 0)} IOPS</strong></div>
-                        <div><span>Network</span><strong>{((vmMetricSeries.at(-1)?.net_rx_mbps ?? 0) + (vmMetricSeries.at(-1)?.net_tx_mbps ?? 0)).toFixed(2)} Mbps</strong></div>
-                        <div><span>Status</span><strong className={`badge ${vm.status}`}>{vm.status}</strong></div>
-                        <div><span>Uptime</span><strong>{vm.uptime}</strong></div>
-                      </div>
-                    </Card>
+                  <div className="stack">
+                    <div className="cards">
+                      <div className="card"><h3 style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><Cpu size={16} /> CPU</h3><p>{vm.cpuCores} vCPU</p></div>
+                      <div className="card"><h3 style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><MemoryStick size={16} /> Memory</h3><p>{vm.ramMb} MB</p></div>
+                      <div className="card"><h3 style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><HardDrive size={16} /> Total Disk</h3><p>{vm.disks.reduce((a: any, b: any) => a + b.sizeGb, 0)} GB</p></div>
+                      <div className="card"><h3 style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><Network size={16} /> Network</h3><p>{vm.nics.length} NICs</p></div>
+                    </div>
+                    <div className="grid-2">
+                      <Card title="CPU / RAM Usage">
+                        {metricsQuery.isLoading ? <Skeleton className="h-56" /> : (
+                          <ResponsiveContainer width="100%" height={220}>
+                            <AreaChart data={vmMetricSeries}>
+                              <defs><linearGradient id="cpu" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3b82f6" stopOpacity={0.8}/><stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/></linearGradient></defs>
+                              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
+                              <XAxis dataKey="created_at" tickFormatter={(time) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} stroke="#6b7280" fontSize={11} />
+                              <YAxis domain={[0, 100]} tickFormatter={(val) => `${val}%`} stroke="#6b7280" fontSize={11} width={45} />
+                              <Tooltip formatter={(value: any) => `${Number(value).toFixed(1)}%`} labelFormatter={(label) => new Date(label).toLocaleString()} />
+                              <Legend verticalAlign="top" height={36} iconType="circle" />
+                              <Area type="monotone" dataKey="cpu" name="CPU" stroke="#3b82f6" strokeWidth={2} fillOpacity={1} fill="url(#cpu)" isAnimationActive={false} />
+                              <Area type="monotone" dataKey="ram" name="RAM" stroke="#22c55e" strokeWidth={2} fillOpacity={0.3} fill="#86efac" isAnimationActive={false} />
+                            </AreaChart>
+                          </ResponsiveContainer>
+                        )}
+                      </Card>
+                      <Card title="Network Activity">
+                        {metricsQuery.isLoading ? <Skeleton className="h-56" /> : (
+                          <ResponsiveContainer width="100%" height={220}>
+                            <AreaChart data={vmMetricSeries}>
+                              <defs><linearGradient id="net_rx" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.8}/><stop offset="95%" stopColor="#8b5cf6" stopOpacity={0}/></linearGradient></defs>
+                              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
+                              <XAxis dataKey="created_at" tickFormatter={(time) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} stroke="#6b7280" fontSize={11} />
+                              <YAxis tickFormatter={(val) => `${Number(val).toFixed(1)} Mbps`} stroke="#6b7280" fontSize={11} width={65} />
+                              <Tooltip formatter={(value: any) => `${Number(value).toFixed(2)} Mbps`} labelFormatter={(label) => new Date(label).toLocaleString()} />
+                              <Legend verticalAlign="top" height={36} iconType="circle" />
+                              <Area type="monotone" dataKey="net_rx_mbps" name="RX (Download)" stroke="#8b5cf6" strokeWidth={2} fillOpacity={1} fill="url(#net_rx)" isAnimationActive={false} />
+                              <Area type="monotone" dataKey="net_tx_mbps" name="TX (Upload)" stroke="#f59e0b" strokeWidth={2} fillOpacity={0.3} fill="#fde68a" isAnimationActive={false} />
+                            </AreaChart>
+                          </ResponsiveContainer>
+                        )}
+                      </Card>
+                    </div>
+                    <div className="grid-2">
+                      <Card title="Disk IOPS">
+                        {metricsQuery.isLoading ? <Skeleton className="h-56" /> : (
+                          <ResponsiveContainer width="100%" height={220}>
+                            <AreaChart data={vmMetricSeries}>
+                              <defs><linearGradient id="disk" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#ec4899" stopOpacity={0.8}/><stop offset="95%" stopColor="#ec4899" stopOpacity={0}/></linearGradient></defs>
+                              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
+                              <XAxis dataKey="created_at" tickFormatter={(time) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} stroke="#6b7280" fontSize={11} />
+                              <YAxis tickFormatter={(val) => `${Number(val)}`} stroke="#6b7280" fontSize={11} width={45} />
+                              <Tooltip formatter={(value: any) => `${Number(value).toFixed(0)} IOPS`} labelFormatter={(label) => new Date(label).toLocaleString()} />
+                              <Legend verticalAlign="top" height={36} iconType="circle" />
+                              <Area type="monotone" dataKey="disk_iops" name="Total IOPS" stroke="#ec4899" strokeWidth={2} fillOpacity={1} fill="url(#disk)" isAnimationActive={false} />
+                            </AreaChart>
+                          </ResponsiveContainer>
+                        )}
+                      </Card>
+                      <Card title="Live Statistics">
+                        <div className="stats-grid">
+                          <div><span>CPU Load</span><strong>{(vmMetricSeries.at(-1)?.cpu ?? 0).toFixed(1)}%</strong></div>
+                          <div><span>RAM Usage</span><strong>{(vmMetricSeries.at(-1)?.ram ?? 0).toFixed(1)}%</strong></div>
+                          <div><span>Disk IOPS</span><strong>{(vmMetricSeries.at(-1)?.disk_iops ?? 0).toFixed(0)} IOPS</strong></div>
+                          <div><span>Network Traffic</span><strong>{((vmMetricSeries.at(-1)?.net_rx_mbps ?? 0) + (vmMetricSeries.at(-1)?.net_tx_mbps ?? 0)).toFixed(2)} Mbps</strong></div>
+                        </div>
+                      </Card>
+                    </div>
                   </div>
                 )}
 
                 {tab === 'console' && (
                   <Card title="Console">
-                    <div className={`console-placeholder ${fullConsole ? 'full' : ''}`}>
+                    <div ref={consoleRef} className={`console-placeholder ${fullConsole ? 'full' : ''}`} style={fullConsole ? { background: '#000', display: 'flex', flexDirection: 'column', height: '100vh' } : {}}>
                       <div className="console-top">
-                        <Button icon={<Monitor size={14} />} onClick={() => setFullConsole((s) => !s)}>{fullConsole ? 'Exit Fullscreen' : 'Fullscreen'}</Button>
+                        <Button icon={<Monitor size={14} />} onClick={toggleFullscreen}>{fullConsole ? 'Exit Fullscreen' : 'Fullscreen'}</Button>
                         <Button icon={<PauseCircle size={14} />} onClick={() => setCaptureKeyboard((s) => !s)}>{captureKeyboard ? 'Release Keyboard' : 'Capture Keyboard'}</Button>
                       </div>
-                      <div className="console-body console-embed">
+                      <div className="console-body console-embed" style={fullConsole ? { flex: 1, minHeight: 'auto' } : {}}>
                         {vm && vm.status === 'running' ? (
                           <iframe
                             title={`noVNC-${vm.id}`}
@@ -866,48 +813,6 @@ export function VmDetailPage() {
                   </Card>
                 )}
 
-                {tab === 'monitoring' && (
-                  <div className="grid-2">
-                    <Card title="CPU / RAM">
-                      <ResponsiveContainer width="100%" height={180}>
-                        <AreaChart data={vmMetricSeries}>
-                          <CartesianGrid strokeDasharray="3 3" />
-                          <XAxis dataKey="created_at" tickFormatter={(time) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} />
-                          <YAxis tickFormatter={(val) => `${val}%`} />
-                          <Tooltip formatter={(value: number) => `${Number(value).toFixed(1)}%`} labelFormatter={(label) => new Date(label).toLocaleString()} />
-                          <Legend verticalAlign="top" height={36} />
-                          <Area type="monotone" dataKey="cpu" name="CPU Yükü" stroke="#2563eb" fill="#93c5fd" fillOpacity={0.4} />
-                          <Area type="monotone" dataKey="ram" name="RAM Yükü" stroke="#16a34a" fill="#86efac" fillOpacity={0.35} />
-                        </AreaChart>
-                      </ResponsiveContainer>
-                    </Card>
-                    <Card title="Disk IOPS">
-                      <ResponsiveContainer width="100%" height={180}>
-                        <AreaChart data={vmMetricSeries}>
-                          <CartesianGrid strokeDasharray="3 3" />
-                          <XAxis dataKey="created_at" tickFormatter={(time) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} />
-                          <YAxis tickFormatter={(val) => `${val} IOPS`} />
-                          <Tooltip formatter={(value: number) => `${Number(value).toFixed(0)} IOPS`} labelFormatter={(label) => new Date(label).toLocaleString()} />
-                          <Legend verticalAlign="top" height={36} />
-                          <Area type="monotone" dataKey="disk_iops" name="Disk IOPS" stroke="#f59e0b" fill="#fde68a" fillOpacity={0.35} />
-                        </AreaChart>
-                      </ResponsiveContainer>
-                    </Card>
-                    <Card title="Network RX/TX">
-                      <ResponsiveContainer width="100%" height={180}>
-                        <AreaChart data={vmMetricSeries}>
-                          <CartesianGrid strokeDasharray="3 3" />
-                          <XAxis dataKey="created_at" tickFormatter={(time) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} />
-                          <YAxis tickFormatter={(val) => `${Number(val).toFixed(1)} Mbps`} />
-                          <Tooltip formatter={(value: number) => `${Number(value).toFixed(2)} Mbps`} labelFormatter={(label) => new Date(label).toLocaleString()} />
-                          <Legend verticalAlign="top" height={36} />
-                          <Area type="monotone" dataKey="net_rx_mbps" name="RX Mbps" stroke="#06b6d4" fill="#67e8f9" fillOpacity={0.35} />
-                          <Area type="monotone" dataKey="net_tx_mbps" name="TX Mbps" stroke="#0ea5e9" fill="#7dd3fc" fillOpacity={0.35} />
-                        </AreaChart>
-                      </ResponsiveContainer>
-                    </Card>
-                  </div>
-                )}
 
                 {tab === 'tasks' && (
                   <div className="grid-2">
@@ -950,206 +855,12 @@ export function VmDetailPage() {
                     ]}
                   />
                 </Card>
-                <Modal open={cloneOpen} title="Clone VM" onClose={() => setCloneOpen(false)}>
-                  <div className="form-grid">
-                    <label>Target VM ID
-                      <input value={cloneTargetId} onChange={(e) => setCloneTargetId(e.target.value)} />
-                    </label>
-                    <label>Clone Type
-                      <select value={cloneType} onChange={(e) => setCloneType(e.target.value as 'full' | 'linked')}>
-                        <option value="full">Full Clone</option>
-                        <option value="linked">Linked Clone</option>
-                      </select>
-                    </label>
-                  </div>
-                  <div className="row-gap">
-                    <Button onClick={async () => {
-                      if (!vm) return;
-                      const targetId = cloneTargetId.trim();
-                      if (!targetId) {
-                        pushToast({ kind: 'error', title: 'Clone failed', message: 'Target VM ID is required.' });
-                        return;
-                      }
-                      await backendVmApi.cloneVm(vm.id, targetId, cloneType);
-                      queryClient.invalidateQueries({ queryKey: ['vms'] });
-                      setCloneOpen(false);
-                      pushToast({ kind: 'success', title: 'Clone queued', message: `${vm.id} -> ${targetId} (${cloneType})` });
-                    }}>Start Clone</Button>
-                  </div>
-                </Modal>
               </>
             )}
           </>
         )}
 
-        <Modal open={createVmOpen} title="Create New VM" onClose={() => setCreateVmOpen(false)}>
-          <div className="wizard-steps">
-            {createSteps.map((stepName, idx) => (
-              <button
-                key={stepName}
-                className={`wizard-step ${createStep === idx ? 'active' : ''} ${createStepHasError(idx) ? 'error' : ''}`}
-                onClick={() => setCreateStep(idx)}
-                type="button"
-              >
-                <span>{idx + 1}</span>{stepName}
-              </button>
-            ))}
-          </div>
-
-          {createStep === 0 && (
-            <div className="form-grid">
-              <label>VM ID <input value={createVmForm.id} onChange={(e) => setCreateVmForm((s) => ({ ...s, id: e.target.value.replace(/[^\d]/g, '') }))} /></label>
-              <label>Name <input value={createVmForm.name} onChange={(e) => setCreateVmForm((s) => ({ ...s, name: e.target.value }))} /></label>
-              <label>Node <input value={createVmForm.node} onChange={(e) => setCreateVmForm((s) => ({ ...s, node: e.target.value }))} /></label>
-              <label>OS Family
-                <select value={createVmForm.osFamily} onChange={(e) => setCreateVmForm((s) => ({ ...s, osFamily: e.target.value as CreateVmForm['osFamily'] }))}>
-                  <option value="linux">Linux</option>
-                  <option value="windows">Windows</option>
-                  <option value="other">Other</option>
-                </select>
-              </label>
-              <label className="span2">OS Version
-                <input value={createVmForm.osVersion} onChange={(e) => setCreateVmForm((s) => ({ ...s, osVersion: e.target.value }))} />
-              </label>
-            </div>
-          )}
-
-          {createStep === 1 && (
-            <div className="form-grid">
-              <label>Sockets
-                <input type="number" min={1} value={createVmForm.cpuSockets} onChange={(e) => setCreateVmForm((s) => ({ ...s, cpuSockets: Number(e.target.value) || 1 }))} />
-              </label>
-              <label>Cores per Socket
-                <input type="number" min={1} value={createVmForm.cpuCores} onChange={(e) => setCreateVmForm((s) => ({ ...s, cpuCores: Number(e.target.value) || 1 }))} />
-              </label>
-              <label>Memory (MB)
-                <input type="number" min={512} step={256} value={createVmForm.memoryMb} onChange={(e) => setCreateVmForm((s) => ({ ...s, memoryMb: Number(e.target.value) || 512 }))} />
-              </label>
-              <label>Timezone
-                <input value={createVmForm.timezone} onChange={(e) => setCreateVmForm((s) => ({ ...s, timezone: e.target.value }))} />
-              </label>
-            </div>
-          )}
-
-          {createStep === 2 && (
-            <div className="form-grid">
-              <label>Disk Size (GB)
-                <input type="number" min={8} value={createVmForm.diskGb} onChange={(e) => setCreateVmForm((s) => ({ ...s, diskGb: Number(e.target.value) || 8 }))} />
-              </label>
-              <label>Storage Pool
-                <select value={createVmForm.storagePool} onChange={(e) => setCreateVmForm((s) => ({ ...s, storagePool: e.target.value }))}>
-                  {(storagePools.length > 0 ? storagePools : [{ name: 'default', state: 'active' }]).map((pool) => (
-                    <option key={pool.name} value={pool.name}>{pool.name} ({pool.state})</option>
-                  ))}
-                </select>
-              </label>
-              <label>Disk Bus
-                <select value={createVmForm.diskBus} onChange={(e) => setCreateVmForm((s) => ({ ...s, diskBus: e.target.value as CreateVmForm['diskBus'] }))}>
-                  <option value="scsi">SCSI (recommended)</option>
-                  <option value="virtio">VirtIO</option>
-                  <option value="sata">SATA</option>
-                </select>
-              </label>
-              <label>Network Mode
-                <select value={createVmForm.networkMode} onChange={(e) => setCreateVmForm((s) => ({ ...s, networkMode: e.target.value as CreateVmForm['networkMode'] }))}>
-                  <option value="bridge">Bridge</option>
-                  <option value="nat">NAT</option>
-                  <option value="private">Private</option>
-                </select>
-              </label>
-              <label>Network Source
-                <input value={createVmForm.networkSource} onChange={(e) => setCreateVmForm((s) => ({ ...s, networkSource: e.target.value }))} placeholder={createVmForm.networkMode === 'bridge' ? 'vmbr0' : 'default'} />
-              </label>
-              <label>NIC Model
-                <select value={createVmForm.nicModel} onChange={(e) => setCreateVmForm((s) => ({ ...s, nicModel: e.target.value as CreateVmForm['nicModel'] }))}>
-                  <option value="virtio">VirtIO (recommended)</option>
-                  <option value="e1000">e1000</option>
-                  <option value="vmxnet3">vmxnet3</option>
-                </select>
-              </label>
-              <label>Boot ISO (optional)
-                <select value={createVmForm.isoPath} onChange={(e) => setCreateVmForm((s) => ({ ...s, isoPath: e.target.value }))}>
-                  <option value="">No ISO</option>
-                  {(isoLibraryQuery.data || []).map((iso) => <option key={iso.path} value={iso.path}>{iso.name}</option>)}
-                </select>
-              </label>
-              <label>Cloud-Init User
-                <input value={createVmForm.cloudInitUser} onChange={(e) => setCreateVmForm((s) => ({ ...s, cloudInitUser: e.target.value }))} />
-              </label>
-              <label>IP Assignment
-                <select value={createVmForm.cloudInitNetwork} onChange={(e) => setCreateVmForm((s) => ({ ...s, cloudInitNetwork: e.target.value as CreateVmForm['cloudInitNetwork'] }))}>
-                  <option value="dhcp">DHCP</option>
-                  <option value="static">Static</option>
-                </select>
-              </label>
-
-              {createVmForm.cloudInitNetwork === 'static' && (
-                <>
-                  <label>Static IP/CIDR
-                    <input value={createVmForm.staticIp} onChange={(e) => setCreateVmForm((s) => ({ ...s, staticIp: e.target.value }))} placeholder="10.0.0.50/24" />
-                  </label>
-                  <label>Gateway
-                    <input value={createVmForm.gateway} onChange={(e) => setCreateVmForm((s) => ({ ...s, gateway: e.target.value }))} placeholder="10.0.0.1" />
-                  </label>
-                </>
-              )}
-
-              <label>DNS
-                <input value={createVmForm.dns} onChange={(e) => setCreateVmForm((s) => ({ ...s, dns: e.target.value }))} />
-              </label>
-
-              <label>VLAN ID (optional)
-                <input value={createVmForm.vlanId} onChange={(e) => setCreateVmForm((s) => ({ ...s, vlanId: e.target.value }))} />
-              </label>
-
-              <div className="span2 row-gap">
-                <Button variant="ghost" onClick={() => setShowAdvancedCreate((v) => !v)}>
-                  {showAdvancedCreate ? 'Hide Advanced' : 'Show Advanced'}
-                </Button>
-                <span className="muted">Only essential fields are shown by default.</span>
-              </div>
-
-              {showAdvancedCreate && (
-                <div className="span2 create-check-grid">
-                  <label className="check-line"><input type="checkbox" checked={createVmForm.startAtBoot} onChange={(e) => setCreateVmForm((s) => ({ ...s, startAtBoot: e.target.checked }))} /> Start at boot</label>
-                  <label className="check-line"><input type="checkbox" checked={createVmForm.firewallEnabled} onChange={(e) => setCreateVmForm((s) => ({ ...s, firewallEnabled: e.target.checked }))} /> Enable default firewall</label>
-                  <label className="check-line"><input type="checkbox" checked={createVmForm.snapshotOnCreate} onChange={(e) => setCreateVmForm((s) => ({ ...s, snapshotOnCreate: e.target.checked }))} /> Take initial snapshot after create</label>
-                </div>
-              )}
-            </div>
-          )}
-
-          {createStep === 3 && (
-            <div className="create-review">
-              <div><span>VM</span><strong>{createVmForm.name} (ID {createVmForm.id || '-'})</strong></div>
-              <div><span>Node</span><strong>{createVmForm.node}</strong></div>
-              <div><span>OS</span><strong>{createVmForm.osFamily} / {createVmForm.osVersion}</strong></div>
-              <div><span>Compute</span><strong>{createVmForm.cpuSockets} socket × {createVmForm.cpuCores} core, {createVmForm.memoryMb} MB RAM</strong></div>
-              <div><span>Storage</span><strong>{createVmForm.diskGb} GB {createVmForm.diskBus.toUpperCase()}</strong></div>
-              <div><span>Storage Pool</span><strong>{createVmForm.storagePool || 'default'}</strong></div>
-              <div><span>Network</span><strong>{createVmForm.networkMode.toUpperCase()} on {createVmForm.networkSource || 'default'} ({createVmForm.nicModel})</strong></div>
-              <div><span>Boot ISO</span><strong>{createVmForm.isoPath || 'none'}</strong></div>
-              <div><span>Cloud-Init</span><strong>{createVmForm.cloudInitUser} / {createVmForm.cloudInitNetwork.toUpperCase()}</strong></div>
-              <div><span>Policy</span><strong>{createVmForm.startAtBoot ? 'Start at boot' : 'Manual start'} • {createVmForm.firewallEnabled ? 'Firewall on' : 'Firewall off'}</strong></div>
-              {createValidationErrors.length > 0 && (
-                <div className="create-errors">
-                  {createValidationErrors.map((msg) => <p key={msg}>{msg}</p>)}
-                </div>
-              )}
-            </div>
-          )}
-
-          <div className="row-gap">
-            <Button variant="ghost" disabled={createStep === 0} onClick={() => setCreateStep((s) => Math.max(0, s - 1))}>Back</Button>
-            {createStep < createSteps.length - 1 ? (
-              <Button onClick={() => setCreateStep((s) => Math.min(createSteps.length - 1, s + 1))}>Next</Button>
-            ) : (
-              <Button loading={createVmMutation.isPending} disabled={createValidationErrors.length > 0} onClick={() => createVmMutation.mutate()}>
-                Create VM
-              </Button>
-            )}
-          </div>
-        </Modal>
+        <VmCreateDrawer open={createVmOpen} onClose={() => setCreateVmOpen(false)} isoLibrary={isoLibraryQuery.data || []} storagePools={storagePools} />
       </main>
 
       <ToastViewport />

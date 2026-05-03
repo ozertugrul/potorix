@@ -1,24 +1,28 @@
 services:
   vnc-proxy:
     build: .
+    restart: unless-stopped
+    network_mode: host
     command:
       - sh
       - -lc
       - mkdir -p /tmp/websockify && rm -f /tmp/websockify/tokens && touch /tmp/websockify/tokens && websockify --verbose --token-plugin TokenFile --token-source /tmp/websockify/tokens 0.0.0.0:6080
-    ports:
-      - '6080:6080'
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - /tmp/potorix-websockify:/tmp/websockify
+    healthcheck:
+      test: ["CMD-SHELL", "ruby -rsocket -e 'begin; s = TCPSocket.new(\"127.0.0.1\", 6080); s.close; exit 0; rescue; exit 1; end'"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
 
   api:
     build: .
+    restart: unless-stopped
     command: bundle exec puma -b tcp://0.0.0.0:9292 config.ru
     env_file:
       - .env
     environment:
-      VNC_PROXY_TARGET_HOST: host.docker.internal
+      VNC_PROXY_TARGET_HOST: 127.0.0.1
       WEBSOCKIFY_TOKEN_FILE: /tmp/websockify/tokens
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -31,16 +35,22 @@ services:
       - /var/lib/libvirt/images:/var/lib/libvirt/images
       - /var/lib/libvirt/boot:/var/lib/libvirt/boot
       - /tmp/potorix-websockify:/tmp/websockify
+    healthcheck:
+      test: ["CMD-SHELL", "ruby -rnet/http -e 'uri = URI(\"http://127.0.0.1:9292/health\"); res = Net::HTTP.get_response(uri); exit(res.is_a?(Net::HTTPSuccess) ? 0 : 1)'"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
     depends_on:
       db:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
       vnc-proxy:
-        condition: service_started
+        condition: service_healthy
 
   worker:
     build: .
+    restart: unless-stopped
     command: bundle exec sidekiq -r ./config/sidekiq.rb -C sidekiq.yml
     env_file:
       - .env
@@ -52,14 +62,20 @@ services:
       - /var/run/libvirt:/var/run/libvirt
       - /var/lib/libvirt/images:/var/lib/libvirt/images
       - /var/lib/libvirt/boot:/var/lib/libvirt/boot
+    healthcheck:
+      test: ["CMD-SHELL", "ruby -e 'cmd = File.read(\"/proc/1/cmdline\"); exit(cmd.include?(\"sidekiq\") ? 0 : 1)'"]
+      interval: 15s
+      timeout: 3s
+      retries: 6
     depends_on:
       db:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
 
   db:
     image: postgres:16
+    restart: unless-stopped
     environment:
       POSTGRES_DB: potorix
       POSTGRES_USER: postgres
@@ -72,3 +88,9 @@ services:
 
   redis:
     image: redis:7
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 12

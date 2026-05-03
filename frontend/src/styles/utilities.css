@@ -27,8 +27,12 @@ button, input, select, textarea { font: inherit; }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
-.cardx { background: #fff; border: 1px solid #dce8fb; border-radius: 12px; padding: 12px; }
-.cardx-title { margin: 0 0 10px; font-size: 15px; color: #2a3f68; }
+.card { background: #fff; border: 1px solid #dce8fb; border-radius: 12px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.02); }
+.card-title { margin: 0 0 12px; font-size: 15px; color: #2a3f68; font-weight: 600; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.cards .card { display: flex; flex-direction: column; justify-content: center; align-items: flex-start; }
+.cards .card h3 { margin: 0 0 4px; font-size: 13px; color: #607595; text-transform: uppercase; letter-spacing: 0.5px; }
+.cards .card p { margin: 0; font-size: 22px; font-weight: 700; color: #1d4ed8; }
 
 .tag-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .tag-row input { padding: 7px 8px; border: 1px solid #cbdcf8; border-radius: 8px; }
@@ -87,6 +91,49 @@ input, select, textarea { width: 100%; border: 1px solid #cadcf8; border-radius:
 .modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .modal-header h4 { margin: 0; }
 .modal-header button { border: 0; background: transparent; cursor: pointer; font-size: 18px; }
+
+/* Drawer */
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(9,14,24,.56);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 1100;
+}
+
+.drawer-panel {
+  width: min(500px, 100vw);
+  background: #fff;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -4px 0 24px rgba(0, 0, 0, 0.1);
+  animation: slideLeft 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes slideLeft {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+
+.drawer-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid #d7e5fb;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #f9fbff;
+}
+
+.drawer-header h3 { margin: 0; font-size: 18px; color: #17263e; }
+.drawer-header button { border: 0; background: transparent; cursor: pointer; font-size: 20px; color: #5f6f89; }
+
+.drawer-body {
+  padding: 20px;
+  overflow-y: auto;
+  flex: 1;
+}
 
 .toast-wrap { position: fixed; right: 14px; top: 14px; display: grid; gap: 8px; z-index: 9999; }
 .toast { min-width: 260px; max-width: 420px; border-radius: 10px; background: #fff; border: 1px solid #dce8fb; border-left: 4px solid #2563eb; padding: 10px; box-shadow: 0 8px 24px rgba(16,26,44,.18); cursor: pointer; }
