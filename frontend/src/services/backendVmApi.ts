@@ -4,7 +4,7 @@ const DEV_AUTH_DEFAULTS = Object.freeze({ tenant: 'tenant-a', token: 'dev-admin-
 const AUTH_STORAGE_KEYS = Object.freeze({ tenant: 'potorix.auth.tenant', token: 'potorix.auth.token' });
 const OVERRIDE_KEY = 'potorix.vm-overrides.v1';
 
-type VmOverride = Partial<Pick<VmEntity, 'tags' | 'options' | 'cloudInit' | 'firewallEnabled' | 'firewallRules' | 'permissions' | 'cpuCores' | 'ramMb' | 'cdrom' | 'disks'>>;
+type VmOverride = Partial<Pick<VmEntity, 'tags' | 'options' | 'cloudInit' | 'firewallEnabled' | 'firewallRules' | 'permissions' | 'cpuCores' | 'ramMb' | 'cdrom' | 'disks' | 'nics'>>;
 
 interface BackendVmDetail {
   id: string;
@@ -16,7 +16,7 @@ interface BackendVmDetail {
   iso_path?: string | null;
   network_mode?: string | null;
   network_source?: string | null;
-  wizard?: Record<string, unknown>;
+  wizard?: Record<string, any>;
   disks?: Array<{ target?: string; source?: string; device?: string }>;
   interfaces?: Array<{ source?: string; model?: string; type?: string }>;
 }
@@ -40,19 +40,8 @@ interface BackendBackupRun {
 }
 
 interface SystemUsage {
-  host: {
-    cpu_total: number;
-    memory_total_mb: number;
-    disk_total_gb: number;
-    disk_free_gb: number;
-  };
-  tenant: {
-    vm_total: number;
-    vm_running: number;
-    alloc_vcpus: number;
-    alloc_memory_mb: number;
-    alloc_disk_gb: number;
-  };
+  host: { cpu_total: number; memory_total_mb: number; disk_total_gb: number; disk_free_gb: number };
+  tenant: { vm_total: number; vm_running: number; alloc_vcpus: number; alloc_memory_mb: number; alloc_disk_gb: number };
 }
 
 interface VmUsageSample {
@@ -75,9 +64,9 @@ export interface VmOperationItem {
   id: number;
   vm_id: string;
   action: string;
-  status: 'queued' | 'running' | 'success' | 'failed' | string;
+  status: string;
   error_message?: string | null;
-  payload: Record<string, unknown>;
+  payload: Record<string, any>;
   sidekiq_jid?: string | null;
   created_at?: string;
   started_at?: string;
@@ -246,11 +235,6 @@ function toVmEntity(detail: BackendVmDetail, jobs: BackendJob[], backups: Backen
   return applyOverride(base);
 }
 
-function stableHash(input: string) {
-  let hash = 0;
-  for (let i = 0; i < input.length; i += 1) hash = (hash * 31 + input.charCodeAt(i)) | 0;
-  return Math.abs(hash);
-}
 
 export const backendVmApi = {
   async getSystemUsage() {
