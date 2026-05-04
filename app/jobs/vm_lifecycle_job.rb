@@ -32,7 +32,14 @@ class VmLifecycleJob
     when 'start'
       adapter.start(vm_id)
     when 'stop'
+      # User wants "Stop" to be "soft close" (graceful)
       adapter.shutdown(vm_id)
+    when 'shutdown'
+      # User wants "Shutdown" button to be "hard stop" (destroy)
+      adapter.stop(vm_id)
+    when 'reboot'
+      # User wants "Reboot" to be "instant reboot" (reset)
+      adapter.reset(vm_id)
     when 'destroy'
       adapter.destroy_domain(vm_id)
       DB[:tenant_vms].where(tenant_id: tenant, vm_id: vm_id).delete

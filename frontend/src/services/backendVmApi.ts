@@ -455,11 +455,10 @@ export const backendVmApi = {
 
   async action(vmId: string, action: string) {
     if (action === 'start') await apiRequest(`/api/v1/vms/${encodeURIComponent(vmId)}/start`, { method: 'POST' });
-    else if (action === 'stop' || action === 'shutdown') await apiRequest(`/api/v1/vms/${encodeURIComponent(vmId)}/stop`, { method: 'POST' });
-    else if (action === 'reboot') {
-      await apiRequest(`/api/v1/vms/${encodeURIComponent(vmId)}/stop`, { method: 'POST' });
-      await apiRequest(`/api/v1/vms/${encodeURIComponent(vmId)}/start`, { method: 'POST' });
-    } else if (action === 'delete') await apiRequest(`/api/v1/vms/${encodeURIComponent(vmId)}`, { method: 'DELETE' });
+    else if (action === 'stop') await apiRequest(`/api/v1/vms/${encodeURIComponent(vmId)}/stop`, { method: 'POST' });
+    else if (action === 'shutdown') await apiRequest(`/api/v1/vms/${encodeURIComponent(vmId)}/shutdown`, { method: 'POST' });
+    else if (action === 'reboot') await apiRequest(`/api/v1/vms/${encodeURIComponent(vmId)}/reboot`, { method: 'POST' });
+    else if (action === 'delete') await apiRequest(`/api/v1/vms/${encodeURIComponent(vmId)}`, { method: 'DELETE' });
     else if (action === 'purge') await apiRequest(`/api/v1/vms/${encodeURIComponent(vmId)}/purge`, { method: 'POST' });
     else if (action === 'snapshot') {
       const snapshotName = `quick-${new Date().toISOString().replace(/[:.]/g, '-')}`;

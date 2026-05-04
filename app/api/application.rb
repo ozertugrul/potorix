@@ -741,6 +741,24 @@ class Application < Sinatra::Base
     Oj.dump(status: 'queued', action: 'stop', vm_id: vm_id, operation_id: operation_id, job_id: jid)
   end
 
+  post '/api/v1/vms/:id/shutdown' do
+    authorize!('vm:operate')
+    vm_id = sanitize_id(params[:id])
+    assert_tenant_vm!(vm_id)
+    operation_id, jid = enqueue_operation('shutdown', vm_id)
+    status 202
+    Oj.dump(status: 'queued', action: 'shutdown', vm_id: vm_id, operation_id: operation_id, job_id: jid)
+  end
+
+  post '/api/v1/vms/:id/reboot' do
+    authorize!('vm:operate')
+    vm_id = sanitize_id(params[:id])
+    assert_tenant_vm!(vm_id)
+    operation_id, jid = enqueue_operation('reboot', vm_id)
+    status 202
+    Oj.dump(status: 'queued', action: 'reboot', vm_id: vm_id, operation_id: operation_id, job_id: jid)
+  end
+
   get '/api/v1/vms/:id/guest-info' do
     authorize!('vm:read')
     vm_id = sanitize_id(params[:id])

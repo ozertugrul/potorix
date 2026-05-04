@@ -154,6 +154,30 @@ module Hypervisor
       end
     end
 
+    def reboot(domain_id)
+      run('reboot', clean(domain_id), '--mode', 'agent')
+    rescue CommandError => e
+      msg = e.message.to_s
+      if msg.include?('domain is not running') || msg.include?('domain is not active')
+        'not-running'
+      elsif msg.include?('unknown --mode') || msg.include?('unsupported configuration: unknown reboot mode') || msg.include?('guest agent')
+        run('reboot', clean(domain_id))
+      else
+        raise
+      end
+    end
+
+    def reset(domain_id)
+      run('reset', clean(domain_id))
+    rescue CommandError => e
+      msg = e.message.to_s
+      if msg.include?('domain is not running') || msg.include?('domain is not active')
+        'not-running'
+      else
+        raise
+      end
+    end
+
     def destroy(domain_id)
       run('destroy', clean(domain_id))
     rescue CommandError => e
